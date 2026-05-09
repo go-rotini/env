@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"reflect"
+	"strings"
 )
 
 // Loader is a configured environment-variable loader. Construct with [New];
@@ -67,6 +69,17 @@ func (l *Loader) LoadContext(ctx context.Context, v any) error {
 	multi := &MultiError{}
 	for _, fd := range info.Fields {
 		l.populateField(ctx, rv, fd, src, multi)
+	}
+
+	// Whole-struct validator hook. Skipped when per-field errors exist:
+	// the struct is in a partial state and Validate would likely produce
+	// noise that compounds with the parse errors.
+	if len(multi.Errors) == 0 {
+		if v, ok := rv.Addr().Interface().(Validator); ok {
+			if err := v.Validate(); err != nil {
+				multi.Append(&ValidationError{Cause: err})
+			}
+		}
 	}
 
 	if len(multi.Errors) > 0 {
@@ -179,31 +192,63 @@ func (l *Loader) composedSource() Source {
 	return Multi(l.opts.sources...)
 }
 
-// populateField runs the per-field pipeline: source lookup, default
-// application, required/notEmpty checks, decode, and assignment.
+// populateField runs the per-field pipeline:
 //
-// The Mutator chain (Phase 7), Validator hook (Phase 7), Expand option
-// (Phase 9), FromFile / Unset / Secret tag options (Phase 7), and
-// Immutable enforcement (Phase 11) are not yet wired; their hook points
-// are noted in comments where they would slot into the pipeline.
-func (l *Loader) populateField(_ context.Context, root reflect.Value, fd fieldDescriptor, src Source, multi *MultiError) {
+//  1. Source lookup.
+//  2. Default application (if not sourced).
+//  3. Mutator chain (may rewrite or synthesize).
+//  4. Required / notEmpty checks (after mutator so synthesized values
+//     can satisfy required).
+//  5. fromFile substitution (read file contents as the actual value).
+//  6. Decode (custom decoder or built-in).
+//  7. unset (call os.Unsetenv on the resolved key, unless [WithoutUnset]).
+//
+// (Phase 9) Variable expansion is a step between the mutator chain and
+// fromFile when fd.Expand is set. (Phase 11) Immutable enforcement
+// happens at the Live[T] level, not here.
+func (l *Loader) populateField(ctx context.Context, root reflect.Value, fd fieldDescriptor, src Source, multi *MultiError) {
 	resolvedKey := l.opts.prefix + fd.Key
 
-	rawValue, ok := src.Lookup(resolvedKey)
-	if !ok {
-		switch {
-		case fd.HasDefault:
-			rawValue = fd.DefaultValue
-		case fd.Required || fd.NotEmpty || (l.opts.requireAll && !fd.HasDefault):
+	rawValue, sourced := src.Lookup(resolvedKey)
+	originalValue := rawValue // captured for the mutator chain (always the source's view)
+	hasValue := sourced
+
+	if !sourced && fd.HasDefault {
+		rawValue = fd.DefaultValue
+		hasValue = true
+	}
+
+	// Mutator chain runs after default application but before checks /
+	// fromFile / decode. A mutator may rewrite the current value or
+	// synthesize a value for an otherwise-unset field.
+	for _, m := range l.opts.mutators {
+		nv, stop, err := m.MutateEnv(ctx, fd.Key, resolvedKey, originalValue, rawValue, sourced)
+		if err != nil {
+			multi.Append(fmt.Errorf("env: field %s mutator: %w", fd.GoPath, err))
+			return
+		}
+		rawValue = nv
+		if !hasValue && nv != "" {
+			// Mutator synthesized a value for an unset/no-default field.
+			hasValue = true
+		}
+		if stop {
+			break
+		}
+	}
+
+	// Required / requireAll checks run AFTER the mutator chain so a
+	// mutator can satisfy them by synthesizing a value.
+	if !hasValue {
+		if fd.Required || fd.NotEmpty || (l.opts.requireAll && !fd.HasDefault) {
 			multi.Append(&MissingRequiredError{
 				Field: fd.GoPath,
 				Key:   resolvedKey,
 			})
 			return
-		default:
-			// Unset and optional: leave the field at its zero value.
-			return
 		}
+		// Unset and optional: leave the field at its zero value.
+		return
 	}
 
 	if fd.NotEmpty && rawValue == "" {
@@ -214,27 +259,50 @@ func (l *Loader) populateField(_ context.Context, root reflect.Value, fd fieldDe
 		return
 	}
 
-	// (Phase 7) Mutator chain would run here.
-	// (Phase 9) Expand pass would run here when fd.Expand is set.
-	// (Phase 7) FromFile substitution would run here when fd.FromFile is set.
+	// fromFile: treat the resolved value as a path; read its contents.
+	// A single trailing \n or \r\n is stripped, matching the convention
+	// used by `kubectl create secret --from-file`.
+	if fd.FromFile && rawValue != "" {
+		data, err := os.ReadFile(rawValue)
+		if err != nil {
+			multi.Append(fmt.Errorf("env: field %s: read %q: %w",
+				fd.GoPath, rawValue, ErrFromFileRead))
+			return
+		}
+		text := string(data)
+		text = strings.TrimSuffix(text, "\n")
+		text = strings.TrimSuffix(text, "\r")
+		rawValue = text
+	}
 
 	field := fieldByIndexAlloc(root, fd.Index)
 
 	if dec, ok := l.opts.customDecoders[field.Type()]; ok {
 		if err := dec(rawValue, field); err != nil {
-			multi.Append(annotateParseError(err, fd.GoPath, resolvedKey, rawValue, field.Type()))
+			multi.Append(l.annotateParseError(err, fd, resolvedKey, rawValue, field.Type()))
 			return
 		}
-		// (Phase 7) Unset of fd.Unset would run here.
+		l.maybeUnset(fd, resolvedKey)
 		return
 	}
 
 	if err := decodeValue(field, rawValue, decodeOptsFromDescriptor(fd)); err != nil {
-		multi.Append(annotateParseError(err, fd.GoPath, resolvedKey, rawValue, field.Type()))
+		multi.Append(l.annotateParseError(err, fd, resolvedKey, rawValue, field.Type()))
 		return
 	}
 
-	// (Phase 7) Unset of fd.Unset would run here.
+	l.maybeUnset(fd, resolvedKey)
+}
+
+// maybeUnset honors the unset tag option after a successful decode. The
+// global [WithoutUnset] disables the behavior. Calls os.Unsetenv with
+// the inherent thread-safety caveat documented at §12.14: callers using
+// the unset tag accept that the loader does an os-level write.
+func (l *Loader) maybeUnset(fd fieldDescriptor, resolvedKey string) {
+	if !fd.Unset || l.opts.withoutUnset {
+		return
+	}
+	_ = os.Unsetenv(resolvedKey)
 }
 
 // fieldByIndexAlloc walks the FieldByIndex path on root, allocating any
@@ -260,8 +328,9 @@ func fieldByIndexAlloc(root reflect.Value, index []int) reflect.Value {
 }
 
 // annotateParseError augments a [*ParseError] returned from the decoder
-// with field-level context. Other error types are returned unchanged.
-func annotateParseError(err error, field, key, value string, typ reflect.Type) error {
+// with field-level context, redacting the value if the field is tagged
+// secret. Other error types are returned unchanged.
+func (l *Loader) annotateParseError(err error, fd fieldDescriptor, key, value string, typ reflect.Type) error {
 	var pe *ParseError
 	if !errors.As(err, &pe) {
 		return err
@@ -269,7 +338,7 @@ func annotateParseError(err error, field, key, value string, typ reflect.Type) e
 	// Build a copy to avoid mutating an error owned by the decoder
 	// (which may be a sentinel or shared with another goroutine).
 	out := *pe
-	out.Field = field
+	out.Field = fd.GoPath
 	out.Key = key
 	if out.Type == "" {
 		out.Type = typ.String()
@@ -277,5 +346,23 @@ func annotateParseError(err error, field, key, value string, typ reflect.Type) e
 	if out.Value == "" {
 		out.Value = value
 	}
+	if fd.Secret {
+		out.Value = l.redactor()(out.Value)
+		// Wipe the underlying cause too: stdlib parse errors typically
+		// include the raw value in their Error() text (strconv prefixes
+		// "parsing %q"), which would leak the secret. We trade a tiny
+		// bit of diagnostic detail for guaranteed redaction.
+		out.Cause = nil
+	}
 	return &out
+}
+
+// redactor returns the loader's secret redactor, or the package default
+// if the loader was constructed before Phase 7 (defensive — every Loader
+// constructed via [New] has the default set).
+func (l *Loader) redactor() func(string) string {
+	if l.opts.secretRedactor != nil {
+		return l.opts.secretRedactor
+	}
+	return defaultSecretRedactor
 }

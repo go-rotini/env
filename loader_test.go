@@ -3,6 +3,8 @@ package env
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -630,6 +632,112 @@ func TestLoader_EmptySourceChain(t *testing.T) {
 	}
 	if cfg.X != "fallback" {
 		t.Errorf("default not applied with empty source chain: %q", cfg.X)
+	}
+}
+
+// --- fromFile tag ---
+
+func TestLoader_FromFile_HappyPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "secret.txt")
+	if err := os.WriteFile(path, []byte("from-file-value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	type cfg struct {
+		Token string `env:"TOKEN_FILE,fromFile"`
+	}
+	loader := New(WithSource(Map(map[string]string{"TOKEN_FILE": path})))
+	var c cfg
+	if err := loader.Load(&c); err != nil {
+		t.Fatal(err)
+	}
+	// Trailing \n is stripped.
+	if c.Token != "from-file-value" {
+		t.Errorf("Token = %q", c.Token)
+	}
+}
+
+func TestLoader_FromFile_TrimsCRLF(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "secret.txt")
+	if err := os.WriteFile(path, []byte("value\r\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	type cfg struct {
+		Token string `env:"TOKEN_FILE,fromFile"`
+	}
+	loader := New(WithSource(Map(map[string]string{"TOKEN_FILE": path})))
+	var c cfg
+	if err := loader.Load(&c); err != nil {
+		t.Fatal(err)
+	}
+	if c.Token != "value" {
+		t.Errorf("Token = %q (CRLF not stripped)", c.Token)
+	}
+}
+
+func TestLoader_FromFile_NotFound(t *testing.T) {
+	type cfg struct {
+		Token string `env:"TOKEN_FILE,fromFile"`
+	}
+	loader := New(WithSource(Map(map[string]string{"TOKEN_FILE": "/no/such/file.txt"})))
+	var c cfg
+	err := loader.Load(&c)
+	if !errors.Is(err, ErrFromFileRead) {
+		t.Errorf("err = %v, want ErrFromFileRead", err)
+	}
+}
+
+func TestLoader_FromFile_EmptyValueIsSkipped(t *testing.T) {
+	// fromFile only fires on non-empty values; an empty value passes
+	// through unchanged.
+	type cfg struct {
+		Token string `env:"TOKEN_FILE,fromFile"`
+	}
+	loader := New(WithSource(Map(map[string]string{"TOKEN_FILE": ""})))
+	var c cfg
+	if err := loader.Load(&c); err != nil {
+		t.Fatal(err)
+	}
+	if c.Token != "" {
+		t.Errorf("Token = %q, want empty", c.Token)
+	}
+}
+
+// --- unset tag ---
+
+func TestLoader_UnsetTag(t *testing.T) {
+	const key = "ENVTEST_UNSET_AFTER_LOAD"
+	t.Setenv(key, "secret-value")
+	type cfg struct {
+		Field string `env:"ENVTEST_UNSET_AFTER_LOAD,unset"`
+	}
+	var c cfg
+	if err := Load(&c); err != nil {
+		t.Fatal(err)
+	}
+	if c.Field != "secret-value" {
+		t.Errorf("Field = %q (decode should still see the value)", c.Field)
+	}
+	// After Load, the env var should be unset.
+	if _, ok := os.LookupEnv(key); ok {
+		t.Errorf("env var still set after Load with unset tag")
+	}
+}
+
+func TestLoader_WithoutUnset(t *testing.T) {
+	const key = "ENVTEST_WITHOUT_UNSET"
+	t.Setenv(key, "still-here")
+	type cfg struct {
+		Field string `env:"ENVTEST_WITHOUT_UNSET,unset"`
+	}
+	loader := New(WithoutUnset())
+	var c cfg
+	if err := loader.Load(&c); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := os.LookupEnv(key); !ok {
+		t.Errorf("env var was unset despite WithoutUnset")
 	}
 }
 

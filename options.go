@@ -1,6 +1,7 @@
 package env
 
 import (
+	"fmt"
 	"log/slog"
 	"reflect"
 )
@@ -19,6 +20,9 @@ type loaderOptions struct {
 	requireAll     bool
 	logger         *slog.Logger
 	customDecoders map[reflect.Type]customDecoderFn
+	mutators       []Mutator
+	secretRedactor func(string) string
+	withoutUnset   bool
 }
 
 // customDecoderFn is the dispatcher signature for decoders registered via
@@ -32,7 +36,27 @@ func defaultLoaderOptions() loaderOptions {
 		sources:        []Source{OSEnv()},
 		tagName:        "env",
 		fieldNameXform: toScreamingSnake,
+		secretRedactor: defaultSecretRedactor,
 	}
+}
+
+// defaultSecretRedactor renders a length-revealing marker for secret
+// values that surface in error messages or [Describe] output.
+//
+//	"" => "<redacted>"   (no length leak; keeps logs grep-friendly)
+//	"x" => "<redacted: 1 byte>"
+//	"abcdef" => "<redacted: 6 bytes>"
+//
+// Override via [WithSecretRedactor].
+func defaultSecretRedactor(value string) string {
+	if value == "" {
+		return secretMarker
+	}
+	suffix := "bytes"
+	if len(value) == 1 {
+		suffix = "byte"
+	}
+	return fmt.Sprintf("<redacted: %d %s>", len(value), suffix)
 }
 
 // WithSource REPLACES the loader's source chain. The default loader uses
@@ -132,6 +156,49 @@ func WithRequireAll() Option {
 func WithLogger(l *slog.Logger) Option {
 	return func(o *loaderOptions) {
 		o.logger = l
+	}
+}
+
+// WithMutator registers one or more [Mutator]s in chain order. May be
+// called multiple times to extend the chain.
+//
+// The chain runs once per field, after source lookup and default
+// application but before decoding. See [Mutator] for the full contract.
+func WithMutator(m ...Mutator) Option {
+	return func(o *loaderOptions) {
+		o.mutators = append(o.mutators, m...)
+	}
+}
+
+// WithSecretRedactor overrides the redaction function applied to
+// secret-tagged field values that surface in error messages and
+// [Describe] / [PrintUsage] / [Markdown] output.
+//
+// The default redactor returns "<redacted: N bytes>" (or "<redacted>"
+// for empty values). The encoder's secret-tag handling (see Phase 6)
+// uses a separate hardcoded "***" marker and is unaffected by this
+// option.
+//
+// Setting fn to nil restores the default redactor.
+func WithSecretRedactor(fn func(value string) string) Option {
+	return func(o *loaderOptions) {
+		if fn == nil {
+			o.secretRedactor = defaultSecretRedactor
+			return
+		}
+		o.secretRedactor = fn
+	}
+}
+
+// WithoutUnset disables the per-field `unset` tag option globally for
+// this loader. Useful in test environments where the process env should
+// remain inspectable after Load.
+//
+// The default behavior (without this option) is that any field tagged
+// with `unset` triggers an [os.Unsetenv] call after a successful decode.
+func WithoutUnset() Option {
+	return func(o *loaderOptions) {
+		o.withoutUnset = true
 	}
 }
 
