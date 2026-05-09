@@ -69,21 +69,87 @@
 //
 // # Pitfalls
 //
-// Environment variables come with platform-specific quirks documented at
-// length in the requirements document and reproduced here in summary:
+// Environment variables come with platform-specific quirks. The list below is
+// the curated subset most likely to bite a new user; the full catalog lives
+// in §12 of the package's design document.
 //
-//   - Windows env-var names are case-insensitive; POSIX is case-sensitive.
-//     The OSEnv source matches the platform.
-//   - os.Getenv collapses unset and empty; the Source interface preserves the
-//     distinction via the second bool return.
-//   - os.Setenv is not thread-safe under cgo. The package never calls
-//     os.Setenv from inside library code (the unset tag option is the single
-//     opt-in exception).
-//   - On macOS, fsnotify-backed watching of a single file dies after an
-//     atomic-rename save (Vim, Helix, many IDEs). The env/dotenv/watcher
-//     sub-package watches the parent directory and filters by filename to
-//     handle this.
-//   - Secret-tagged fields are redacted in error messages, Describe output,
-//     and Encode output by default. Round-trips through Encode + Load are
-//     therefore lossy for secrets unless WithEncodeIncludeSecrets is set.
+// OS-level:
+//
+//   - Windows folds env-var names to uppercase; POSIX is case-sensitive. The
+//     [OSEnv] source matches the platform — for cross-platform tests, use
+//     [Map] with [WithCaseInsensitive].
+//   - [os.Getenv] collapses unset and empty into "". The [Source] interface
+//     preserves the distinction via the second bool return; [OSEnv] uses
+//     [os.LookupEnv] to honor it. The `required` tag option is satisfied by
+//     a set-but-empty value; `notEmpty` requires both set and non-empty.
+//   - [os.Setenv] / [os.Unsetenv] are not thread-safe under cgo (golang/go
+//     #63567). This package never calls them from library code; the `unset`
+//     tag option is the single opt-in exception, serialized within a Load
+//     call. Disable globally via [WithoutUnset] in test environments.
+//   - [os.Environ] returns degenerate entries on Windows (empty keys,
+//     leading-`=` per-drive variables). [OSEnv] filters them; you don't see
+//     them via [Source.Lookup].
+//
+// Dotenv parsing:
+//
+//   - CRLF / bare CR line endings are normalized; the parser produces the
+//     same AST regardless of which line ending the file used.
+//   - UTF-8 BOM at offset 0 is stripped; a BOM elsewhere is treated as a
+//     literal character.
+//   - Comments inside quoted values are part of the value; the cheap
+//     "split on #" approach is wrong. Trailing whitespace is trimmed for
+//     unquoted values, preserved for quoted.
+//   - The `export ` prefix is stripped only when followed by whitespace and
+//     a valid identifier. `exportFOO=bar` is a bare assignment.
+//   - YAML-style `KEY: value` and backtick-quoted values are dialect
+//     extensions; reject them with [WithStrictDotenv] or accept them with
+//     the relevant opt-in.
+//
+// Live reload:
+//
+//   - Editor "atomic save" patterns (write-temp-then-rename) break naive
+//     fsnotify watches because the new inode is a different file. The
+//     env/dotenv/watcher sub-package watches the parent directory and
+//     filters by filename — the only correct strategy.
+//   - The reload pipeline parses + validates into a fresh candidate before
+//     swapping; failures retain the previous value and emit an error
+//     event. The struct returned by [Live.Get] is therefore always a
+//     successfully-validated snapshot.
+//   - Treat the struct returned by [Live.Get] as IMMUTABLE. The whole point
+//     of the [sync/atomic.Pointer] swap is that readers can rely on a
+//     stable view; mutating it through the returned pointer is a race.
+//   - Fields tagged `immutable` reject reload candidates that would change
+//     them. Initial load is exempt; subsequent reloads compare against the
+//     last successful snapshot.
+//
+// Concurrency:
+//
+//   - [Loader] is safe for concurrent use after construction.
+//   - [Loader.Watch] mutates v in place from the worker goroutine — readers
+//     must NOT touch v concurrently. For lock-free reads use [NewLive]
+//     instead.
+//   - [Source] implementations are required to make Lookup safe for
+//     concurrent use; built-in sources do.
+//
+// Test isolation:
+//
+//   - Global [os.Environ] is shared state; tests that set it are NOT
+//     parallel-safe even via [testing.T.SetEnv]. For parallelizable tests,
+//     prefer [Map] over [OSEnv] as the loader's source.
+//
+// Encoding (reverse direction):
+//
+//   - [Encode] is a tooling feature, not a primary API. Secret-tagged fields
+//     redact to "***" by default; [WithEncodeIncludeSecrets] opts in.
+//     Encode + Load is byte-stable for canonical inputs but is not a
+//     round-trip for `.env` FILES (comments and original quoting are lost).
+//     For lossless `.env` editing, use dotenv.Parse → [(*File).Set] →
+//     [(*File).Marshal].
+//
+// Architecture:
+//
+//   - The root package has zero third-party runtime dependencies. `.env`
+//     parsing lives in env/dotenv (no third-party deps either); fsnotify-
+//     backed watching lives in env/dotenv/watcher. Consumers who only need
+//     OSEnv + Map pay no transitive cost. Verified by `go list -deps`.
 package env

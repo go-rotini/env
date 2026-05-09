@@ -6,6 +6,124 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-05-09
+
+Initial release. The package loads environment variables (and optional `.env`
+files) into Go structs with first-class support for live reload, multiple
+sources, and `encoding/json`-shaped tags. Designed as the default
+environment-variable support package for the rotini CLI framework.
+
+### Added — Loader (root package)
+
+- `Load(v)`, `MustLoad(v)`, generic `LoadTo[T]() (T, error)` and `MustLoadTo[T]() T` for the one-shot path.
+- `Loader` type with `New(opts...)`, `(*Loader).Load`, `(*Loader).LoadContext`, `(*Loader).Snapshot`.
+- `Loader.Watch(ctx, v)` event-stream live-reload API (mutates v from the worker goroutine).
+- Generic `Live[T]` with `atomic.Pointer[T]`-backed lock-free, torn-read-free `Get()`, `Events()`, `Reload()`, `Close()`. `NewLive[T]` and `NewLiveWithLoader[T]` perform an initial Load and refuse construction on first-load failure.
+- Per-field `immutable` enforcement: reload candidates that would change a marked field are rejected and the previous value is retained.
+
+### Added — Tag system
+
+- Single comma-separated `env:"NAME,opt1,opt2"` tag mirroring `encoding/json`.
+- Tag options: `required`, `notEmpty`, `default=value`, `separator=char`, `kvSeparator=char`, `expand`, `fromFile`, `unset`, `secret`, `immutable`, `layout=format`, `base64`, `hex`.
+- Companion tags: `envDesc:"..."` for free-text help, `envPrefix:"PFX_"` for nested struct fields.
+- Default field-name transform: SCREAMING_SNAKE_CASE with acronym detection. Override via `WithFieldNameTransform`.
+- POSIX-strict identifier rules by default; relax via `WithRelaxedNames`.
+- Per-`reflect.Type` field-info cache via `sync.Map` for the default config; loaders with custom tag name / field-name transform bypass the cache and re-walk on every Load.
+
+### Added — Sources
+
+- `Source` interface (`Lookup(key) (value string, ok bool)`), `Watcher` sub-interface (`Watch(ctx) (<-chan Change, error)`), `Change` struct.
+- `OSEnv()` — wraps `os.LookupEnv`, filters degenerate Windows entries.
+- `Map(m, opts...)` — copies its input at construction; `WithCaseInsensitive` for cross-platform tests.
+- `Multi(srcs...)` — first-match-wins precedence chain.
+- `WithSource` (replaces), `WithSourceAppend` (lowest precedence), `WithSourcePrepend` (highest precedence).
+
+### Added — Decoder + built-in types
+
+- Decoder priority chain: custom decoder → tag overrides (`time.Time`+`layout=`, byte container + `base64=`/`hex=`) → `Unmarshaler` → `encoding.TextUnmarshaler` → `encoding.BinaryUnmarshaler` → built-in special types → default reflection.
+- Built-in types: every numeric width (with overflow detection), `bool` (case-insensitive `true`/`false`/`yes`/`no`/`on`/`off`/`1`/`0`), `time.Duration`, `time.Time`, `*time.Location`, `*url.URL`, `net.IP`, `*net.IPNet`, `*regexp.Regexp`, `[]byte` (raw / base64 / hex).
+- Slices and arrays via configurable separator (default `,`); maps via separator + kvSeparator (default `:`).
+- Custom decoders via generic `WithCustomDecoder[T]`.
+
+### Added — Lifecycle hooks
+
+- `Mutator` chain (`MutateEnv`) for value rewriting / observation, runs after default application and before required / decode.
+- `Validator` interface (`Validate() error`) invoked after every field has populated and skipped when per-field errors exist.
+- `fromFile` tag option reads the resolved value as a path and substitutes the file's contents (Docker / K8s secrets pattern).
+- `unset` tag option calls `os.Unsetenv` after a successful decode (the only place in the library that mutates the OS env). Disable globally with `WithoutUnset`.
+
+### Added — Secret handling
+
+- `secret` tag option: redacts the field's value in error messages, `Describe`, `PrintUsage`, `Markdown`, and `Encode` output.
+- `Secret[T]` wrapper: implements `fmt.Stringer`, `fmt.GoStringer`, `slog.LogValuer`, `json.Marshaler`, `Marshaler`, `Unmarshaler` — redacts in user code.
+- `WithSecretRedactor(fn)` overrides the default `<redacted: N bytes>` string.
+- Encode-side secret policies: `WithEncodeIncludeSecrets`, `WithSecretEncodePolicy(SecretRedact|SecretInclude|SecretOmit)`.
+
+### Added — Encode (reverse) path
+
+- `Encode(w, v, opts...)` and `EncodeFile(path, v, opts...)` write a struct as `KEY=VALUE` lines.
+- `EncodeOption` set: `WithEncodeQuoteAll`, `WithEncodeExport`, `WithEncodeIncludeSecrets`, `WithEncodeComments`, `WithEncodeSort`, generic `WithCustomMarshaler[T]`.
+- Quoting: bare for safe values, double-quoted with `\"`/`\\`/`\n`/`\r`/`\t`/`\b`/`\f`/`\$` escapes for whitespace / special chars.
+- `EncodeFile` writes mode-0600 by default.
+
+### Added — Documentation generation
+
+- `Describe(v) []FieldDoc` walks the same field pipeline; `FieldDoc` surfaces every documentation-relevant fact.
+- `PrintUsage(w, v)` writes a column-aligned text table; `Markdown(w, v)` writes a GitHub-Flavored table.
+- Package-level + `(*Loader).Describe` / `PrintUsage` / `Markdown` forms.
+
+### Added — Errors
+
+- `Position`, `MissingRequiredError`, `EmptyValueError`, `ParseError`, `SyntaxError`, `ValidationError`, `ImmutableChangedError`, `CycleError`, `MultiError`.
+- Sentinel errors: `ErrParse`, `ErrUnsupportedType`, `ErrNilPointer`, `ErrNotStruct`, `ErrFromFileRead`, `ErrUnsetExpansion`, `ErrExpansionAssertion`, `ErrWatcherClosed`, `ErrNilContext`.
+- `MultiError.Unwrap() []error` for Go 1.20+ `errors.Is` / `errors.As` walking.
+- `FormatError(err, color...)` renders single or aggregated errors with optional ANSI color.
+
+### Added — Options
+
+- Loader: `WithSource`, `WithSourceAppend`, `WithSourcePrepend`, `WithPrefix`, `WithTagName`, `WithFieldNameTransform`, `WithRelaxedNames`, `WithRequireAll`, `WithLogger`, `WithMutator`, `WithSecretRedactor`, `WithoutUnset`, `WithCustomDecoder[T]`, `WithPollInterval`, `WithReloadDebounce`.
+- Encoder: `WithEncodeQuoteAll`, `WithEncodeExport`, `WithEncodeIncludeSecrets`, `WithEncodeComments`, `WithEncodeSort`, `WithCustomMarshaler[T]`.
+- Constants: `DefaultReloadDebounce` (75ms).
+
+### Added — `env/dotenv` sub-package
+
+- `Parse(data, opts...) (*File, error)` and `Load(path, opts...) (map[string]string, error)`.
+- `NewSource(path, opts...)` and `NewReaderSource(r, opts...)` adapters returning `env.Source`.
+- `(*File)` AST: `Get`, `Set`, `Delete`, `Keys`, `ToMap`, `Path`, `Entries`, `Marshal`. Byte-exact `Marshal` round-trip on canonical inputs; mutated entries re-render with default quoting while preserving sibling bytes.
+- Single-pass byte-level scanner: every quoting form (unquoted, single, double, opt-in backtick), every double-quoted escape (`\n`/`\r`/`\t`/`\b`/`\f`/`\"`/`\\`/`\$`) including line continuation, multi-line double-quoted strings, UTF-8 BOM stripping, all three line endings (LF / CRLF / bare-CR), `export ` prefix, YAML-style `KEY: value`, POSIX-strict and relaxed identifier rules.
+- Variable expansion (`WithExpand`): `$VAR`, `${VAR}`, `${VAR:-default}` (empty triggers default), `${VAR-default}` (POSIX: only unset triggers), `${VAR:?msg}` assertion. Nested defaults via brace-balanced parsing. `\$` in double-quoted values suppresses expansion via a scanner-emitted sentinel byte.
+- DoS guards: `WithMaxFileSize` (default 10 MiB), `WithMaxLineLength` (default 1 MiB), `WithMaxExpansionDepth` (default 16), `WithStrictExpansion` (unset reference is an error).
+- Dialect modes: `WithBackticks`, `WithStrictDotenv`, `WithRelaxedNames`, `WithExpansionParent`.
+- `Lint(data, opts...)` reports portable-subset deviations (`export-prefix`, `yaml-separator`, `non-posix-identifier`, `backtick-value`) at SeverityWarning plus syntax errors at SeverityError.
+- Error types: `*ParseError`, `*ExpansionError`; sentinels `ErrParse`, `ErrExpansion`, `ErrFileTooLarge`, `ErrLineTooLong`.
+
+### Added — `env/dotenv/watcher` sub-package
+
+- `New(path, opts...) (*Source, error)` returns a fsnotify-backed `env.Source` + `env.Watcher`.
+- Watches the parent directory and filters by basename — handles editor "atomic save" patterns (write-temp-then-rename, delete-then-recreate, chmod) reliably without re-binding to specific inodes.
+- Trailing-edge debouncer (`DefaultDebounce` = 75ms) coalesces fsnotify burst events.
+- Per-subscription buffered (cap=1) channel with non-blocking broadcast — slow subscribers cannot stall the worker.
+- Options: `WithParseOptions`, `WithDebounce`, `WithLogger`. Sentinels: `ErrEmptyPath`, `ErrNilContext`, `ErrClosed`.
+- `fsnotify` is the only third-party dependency in the entire module and is contained to this sub-package — verified by `go list -deps` showing zero fsnotify references in the root or `env/dotenv`.
+
+### Testing
+
+- 557 PASS results across the module under `-race`; 96.8% combined statement coverage (97.1% root / 96.4% dotenv / 94.9% watcher).
+- Dialect compatibility (`TestDialectCompat`): 10 fixtures covering bkeepers, motdotla, Compose, Foreman dialects with `_expected.json` companions.
+- Acceptance (`TestAcceptance*`): 5 real-world fixtures (kubectl, GHA, Compose, Rails, Laravel) loaded both at the parser and loader level, including `OSEnv-wins-over-dotenv-source` precedence verification.
+- Six fuzz targets: `FuzzLoader`, `FuzzDecode` (root), `FuzzScanner`, `FuzzParser`, `FuzzExpand`, `FuzzRoundTrip` (dotenv) — clean across 60s smoke per target.
+- Concurrency (`-race`): torn-read-free `Live[T].Get`, multi-Watcher fan-in, debounced burst reload, immutable-change rollback, ctx-cancel close, manual-reload-under-event-storm.
+- Cross-platform: POSIX vs Windows OSEnv case sensitivity gated by `runtime.GOOS`, Windows hidden-vars filter, atomic-rename-save detection.
+- Mutation testing: `.gremlins.yaml` enables all 11 mutator categories at the spec-mandated 80% efficacy threshold.
+
+### Known limitations (deferred to a future release)
+
+- Token-level streaming for very large `.env` files (the parser is value-oriented).
+- Remote secret-source modules (Vault, Consul, AWS Secrets Manager, GCP Secret Manager, Doppler) live in their own modules and implement `env.Source` / `env.Watcher` — first-party adapters out of scope for v0.1.
+- Browser / wasm builds: `os.Environ` semantics differ on `js/wasm`. A build-tagged `OSEnv()` stub returning empty would be straightforward if needed.
+- `encoding.BinaryMarshaler` on the encode path. Currently encode honors `MarshalEnv` then falls back to type-specific built-ins.
+
+
 ### Added
 - Phase 1: project scaffolding — config files, GitHub workflows, Makefile, package documentation skeleton.
 - Phase 2: `Source` interface, `Watcher` sub-interface, `Change` struct, plus root-package built-ins `OSEnv()`, `Map(m, opts...)` (with `WithCaseInsensitive` option), and `Multi(srcs...)`. `Source` is the bedrock contract through which the loader resolves env-var values; `OSEnv` reads from `os.LookupEnv` and rejects degenerate keys (empty / leading `=` / containing `=` or NUL); `Map` copies its input at construction; `Multi` delivers first-match-wins precedence. 100% statement coverage; race-clean.
@@ -15,6 +133,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Phase 6: reverse-direction `Encode` and `EncodeFile`. Renders a struct as a `.env`-format byte stream with the encoder priority chain: custom marshaler → tag-option overrides (`time.Time` + `layout=`, byte container + `base64=`/`hex=`) → `Marshaler` (`MarshalEnv()`) → `encoding.TextMarshaler` → `encoding.BinaryMarshaler` → built-in special types (`time.Duration`, `time.Location`, `net.IPNet`) → byte-container raw form → default reflection. Six `EncodeOption` functions: `WithEncodeQuoteAll`, `WithEncodeExport` (Bash-style `export ` prefix), `WithEncodeIncludeSecrets` (override default redaction), `WithEncodeComments` (per-key overrides for `envDesc`), `WithEncodeSort` (lexicographic key order), generic `WithCustomMarshaler[T]`. Quoting decisions: bare for safe values, double-quoted with `\"`/`\\`/`\n`/`\r`/`\t`/`\b`/`\f`/`\$` escapes for whitespace/special-char values. Secret-tagged fields render as `***` by default. nil pointers and nil slices/maps are omitted entirely; intermediate-nil pointer-to-struct chains drop their leaves. Round-trip stability verified through the loader for every supported type. `EncodeFile` writes mode-0600 files by default. 99.6% statement coverage (the gap is bufio-internal write-error propagations that require pathologically-sized inputs); race-clean.
 - Phase 7: lifecycle hooks and secret handling. Added `Mutator` interface (`MutateEnv(ctx, originalKey, resolvedKey, originalValue, currentValue, sourced) (newValue, stop, err)`) plus `MutatorFunc` adapter. The mutator chain runs after default application and before required/notEmpty checks, so a mutator can synthesize a value for an otherwise-unset field; observation, value rewriting (e.g., `secret://` indirections), and validation are all expressible. Added `Validator` interface (`Validate() error`) with the loader invoking `(*T).Validate` after every field is populated and skipping when per-field errors exist. Added generic `Secret[T]` wrapper implementing `fmt.Stringer`, `fmt.GoStringer`, `slog.LogValuer`, `json.Marshaler`, `Marshaler`, and `Unmarshaler`; the wrapper's `Value()` exposes the underlying T while String/LogValue/MarshalJSON redact to `<redacted>`. Three new options: `WithMutator(...)`, `WithSecretRedactor(fn)` (defaults to `<redacted: N bytes>`), `WithoutUnset()`. Wired the previously-stubbed `fromFile` (read file contents as the value, strip a single trailing `\n`/`\r\n`), `unset` (`os.Unsetenv` after successful decode unless `WithoutUnset`), and secret-aware `*ParseError` redaction (the field's `Cause` is dropped to prevent stdlib parse errors from leaking the raw value). 99.6% statement coverage (Phase 6 bufio gaps unchanged); race-clean.
 - Phase 8: auto-generated documentation via `Describe`, `PrintUsage`, `Markdown`. Added `FieldDoc` struct surfacing every documentation-relevant fact about a field (name, GoType, description, default, required, notEmpty, secret, immutable, separator). Both package-level (`Describe(v, opts...)`) and `Loader`-method forms; opts apply a fresh loader so callers can pass `WithPrefix`/`WithTagName` without constructing a Loader explicitly. `PrintUsage` writes a column-aligned text table (NAME / TYPE / DEFAULT / REQUIRED / DESCRIPTION) with dynamic widths and 40-char default-value truncation; `Markdown` writes a GitHub-Flavored table with backtick-quoted Name / Type / Default cells and `\|`-escaped pipe characters. Description column annotates `(secret)` / `(notEmpty)` / `(immutable)` flag-state prefixes. Empty struct produces empty output; nil / non-struct / structInfo errors propagate from the table writers (Describe returns nil for these cases per spec). 99.7% statement coverage (Phase 6 bufio gaps unchanged); race-clean.
+- Phase 13: documentation + release prep finalization. Expanded `doc.go` Pitfalls section from a 5-bullet summary to a categorized catalog covering OS-level traps (Windows case folding, `os.Getenv` empty-vs-unset collapse, `os.Setenv`/`os.Unsetenv` cgo thread-unsafety, `os.Environ` degenerate Windows entries), dotenv parsing pitfalls (CRLF / bare-CR normalization, UTF-8 BOM at offset 0, comments inside quoted values, `export` prefix recognition rules, YAML-style + backtick dialect extensions), live reload pitfalls (atomic-rename editor saves, validate-before-swap, `Live.Get`-snapshot immutability contract, `immutable`-tag rejection), concurrency (Loader thread safety, Watch's v-mutates-from-worker constraint, Source.Lookup concurrent-safe requirement), test isolation (avoid OSEnv in parallel tests), encoding (round-trip lossiness for comments/quoting, `Encode` is not a `.env`-edit path), and architecture (zero third-party root deps, fsnotify contained to watcher). Beefed up README with runnable code examples for `.env` file loading, Live reload + dotenv/watcher composition, `Describe` / `PrintUsage` / `Markdown` documentation generation, `Encode` reverse direction with secret policy, multi-source precedence chains, and `Validator` cross-field rules. Wrote v0.1.0 CHANGELOG entry sectioned by feature area (Loader / Tag system / Sources / Decoder + built-in types / Lifecycle hooks / Secret handling / Encode / Documentation generation / Errors / Options / `env/dotenv` sub-package / `env/dotenv/watcher` sub-package / Testing / Known limitations). Final verification: `make lint` clean, `make test` green (96.8% combined coverage), `make test-race` green (96.7%), `make test-conformance` + `make test-acceptance` green, all six fuzz targets PASS at 8s smoke (FuzzLoader / FuzzDecode / FuzzScanner / FuzzParser / FuzzExpand / FuzzRoundTrip — 0 panics, 0 corpus regressions). Revive reports 0 missing exported docstrings across 97 exported symbols (68 root / 22 dotenv / 7 watcher). 558 PASS results across the module total, 16,335 LOC across 58 Go files, with 4 known limitations explicitly deferred to a future release (token-level streaming, remote secret-source first-party adapters, browser/wasm build, encoding.BinaryMarshaler on encode).
 - Phase 12: conformance / acceptance / fuzz suite. **Dialect compatibility** — `dotenv/dialect_test.go` drives `TestDialectCompat` against vendored fixtures in `testdata/dialect/{bkeepers,motdotla,compose,foreman}/`, each `.env` paired with a `_expected.json` companion (`{result: map, error: ?string}` schema documented in `testdata/dialect/README.md`). Per-dialect parse-option binding (bkeepers → `WithExpand()`, motdotla/compose/foreman → defaults) ensures the test mirrors what users would observe in the real tool. Ten fixtures total covering the bkeepers `export` prefix and `${VAR:-default}` expansion, motdotla single/double-quote literal-vs-escape semantics + multi-line PRIVATE_KEY blocks, Compose plain `KEY=VALUE` with whitespace-preceded inline `# comment` stripping, and Foreman minimalism. **Acceptance** — `dotenv/acceptance_test.go` (parser-level: `TestAcceptanceLoadStruct`, `TestAcceptanceRoundTrip` byte-equal Marshal, `TestAcceptancePathQueries` Set/Delete identity) and `acceptance_test.go` at root (loader-level: kubectl/GHA/Compose/Rails/Laravel each loaded into a representative struct via `dotenv.NewSource` + `env.New`, plus `TestAcceptance_OSEnvBeatsDotEnvFile` proving the documented OSEnv-wins precedence). Fixtures live in `testdata/acceptance/{kubectl,gha,compose,rails,laravel}.env` — hand-curated representative configs covering the export prefix, set-but-empty values, secret-tagged loader fields, base64 `APP_KEY` shapes, and 40-char SHA verification. **Six fuzz targets** with f.Add seed corpora — `FuzzLoader` (random key/value × 4-field struct covering string/int/bool/slice), `FuzzDecode` (random string × 14 single-field struct shapes hitting every built-in decoder including `time.Time` / `*url.URL` / `net.IP` / `*regexp.Regexp` / `map[string]string`), `FuzzScanner` (default-options Parse), `FuzzParser` (Parse with all dialect-relaxing options), `FuzzExpand` (Parse + WithExpand variants including strict-expansion and depth-cap), `FuzzRoundTrip` (Parse → Marshal → Parse map-equality + double-marshal byte-stability). Each fuzzer's seeds (15-25 entries via `f.Add`) cover BOM/CRLF/multiline/quoting/escape/expansion/garbage-bytes regression cases. Persistent corpus seeds in `testdata/fuzz/FuzzLoader/seed-port-overflow` and `testdata/fuzz/FuzzDecode/seed-malformed-duration` (Go fuzz v1 format). 2-second smoke fuzz per target → ~2.7M total executions, 0 panics, 950+ new-interesting inputs discovered cumulatively. **Cross-platform OS tests** — `source_platform_test.go` adds `TestUnixCaseSensitive` (POSIX-gated, asserts uppercase ≠ lowercase Lookup), `TestWindowsCaseInsensitive` (Windows-gated, asserts case-folding), `TestWindowsHiddenVars` (Windows-gated, asserts `=C:`-style keys are rejected without consulting the OS); `TestAtomicRenameSave`-equivalent already lives at `dotenv/watcher/watcher_test.go::TestWatch_AtomicRename`. **Mutation testing config** verified — `.gremlins.yaml` enables all 11 mutator categories (`arithmetic-base`, `conditionals-boundary`, `conditionals-negation`, `increment-decrement`, `invert-assignments`, `invert-bitwise`, `invert-bwassign`, `invert-negatives`, `invert-logical`, `invert-loopctrl`, `remove-self-assignments`) at the spec-mandated 80% efficacy threshold, runnable via `make test-mutation`. **Make targets verified**: `make test-conformance` runs `TestDialectCompat|TestDotenvCorpus`, `make test-acceptance` runs the `TestAcceptance*` suite across both packages, `make test-fuzz` runs every fuzz target at 60s. 557 PASS results across the module (up from 540 in Phase 11, +17 dialect/acceptance/platform tests); 97.1% root / 96.4% dotenv / 94.9% watcher coverage (96.8% combined); race-clean; lint-clean; `govulncheck` clean.
 - Phase 11: live reload — `(*Loader).Watch(ctx, v)` + generic `Live[T]` with `atomic.Pointer[T]`. Added `Event` type (`Changed []string`, `Err error`, `Time time.Time`); each reload attempt — successful or failed — emits exactly one Event. `Loader.Watch` performs an initial `LoadContext` synchronously, then runs a single-goroutine engine that subscribes to every `Watcher`-implementing source in the chain (fan-in via per-source forwarder goroutines) and optionally polls non-Watcher sources at `WithPollInterval` (clamped to ≥0; 0 disables polling). Source-change bursts are coalesced through a trailing-edge debouncer at `WithReloadDebounce` (default `DefaultReloadDebounce = 75ms`); zero disables debouncing for tests. Each reload builds a fresh candidate of the same type as v via `LoadContext`, captures the resolved-value snapshots for immutable + all known keys via new helpers `(*Loader).snapshotImmutable` / `snapshotKnownKeys` (sentinel `"\x00<unset>\x00"` distinguishes unset-with-no-default from explicit-empty across reloads), runs `compareImmutable` against the previous successful snapshot — failure returns `*ImmutableChangedError` and rolls back without mutating v — and on success commits via `reflect.Value.Set` and computes `Event.Changed` via sorted `diffSnapshots`. `Live[T]` wraps the same engine: `NewLive[T](opts...)` and `NewLiveWithLoader[T](*Loader)` perform the initial Load (refusing construction on failure), then store the `*T` in an `atomic.Pointer[T]` for lock-free, torn-read-free `Get()`. Each successful reload installs a fresh `*T` via `atomic.Pointer.Store`; failures retain the current pointer. `Live[T].Reload()` triggers a synchronous reload through the engine (bypassing the debouncer) and returns the reload error directly; `Live[T].Events()` exposes the same channel; `Live[T].Close()` is idempotent and cancels the engine's context, drains the worker, and closes the events channel. Engine emit policy: buffered events channel (capacity 16) with non-blocking sends — surplus events are dropped with a logger warning so a slow consumer can never block the worker. New options: `WithPollInterval(d)`, `WithReloadDebounce(d)`. New sentinels: `ErrWatcherClosed` (`Live.Reload` after `Close`), `ErrNilContext` (`Loader.Watch` with nil ctx). 540 PASS results across the module (up from 509 in Phase 10, +31 watch/live/concurrency tests including a torn-read-free `Live[T].Get` stress test that runs 8 readers in tight Get loops while the writer publishes 80 generations of 3-key batches and verifies every `Get()` observes a self-consistent triple); 97.1% root / 95.6% dotenv / 94.2% watcher coverage (96.4% combined); race-clean across initial-load, debounced burst reload, immutable-change rollback, ctx-cancel close, multi-Watcher-source fan-in, and 16-reader Get-during-reload-storm scenarios.
 - Phase 10: fsnotify-backed `env/dotenv/watcher` sub-package — a live-reloading [`env.Source`] for a single `.env` file. `watcher.New(path, opts...)` returns a `*Source` that satisfies both `env.Source` (composes with the rest of the loader's source chain) and `env.Watcher` (the loader's future Watch / Live[T] machinery subscribes to file-change events without polling). Watches the **parent directory** with fsnotify and filters events by basename, so editor "atomic save" patterns (write-temp-then-rename, delete-then-recreate, chmod) are all reliably observed since the new inode produced by the editor is a different file than the one initially seen — no need to re-bind to a specific inode. A trailing-edge debouncer (default 75ms via [`DefaultDebounce`]; configurable with `WithDebounce`) coalesces fsnotify burst events into a single re-parse + broadcast. Each call to `Watch(ctx)` returns an independent buffered (cap=1) channel; non-blocking sends on broadcast guarantee a slow subscriber cannot stall the worker. On reload: the file is re-parsed, a sorted diff is computed against the previous values, the new map is installed under a write lock, and one `env.Change{Keys: …}` is fanned out to every active subscriber. Parse failures are logged via the configurable `WithLogger` (`slog.Logger`) — old values are retained, no event is broadcast — and the watcher recovers automatically when the next valid write arrives. `Source.Close()` is idempotent; closing during active subscriptions closes their channels cleanly. Subscriber-context cancellation closes only that subscription's channel (other subscribers continue receiving). `WithParseOptions` forwards arbitrary `dotenv.ParseOption` values to every parse so expand/backticks/strict modes propagate through reload. New sentinels: `ErrEmptyPath`, `ErrNilContext`, `ErrClosed` (callers can `errors.Is` against them). `fsnotify` is now a direct module require but appears in NO import graph except `env/dotenv/watcher` (verified: `go list -deps ./` and `go list -deps ./dotenv` both report zero fsnotify references). 509 PASS results across the module; 99.7% root / 95.6% dotenv / 94.2% watcher coverage (97.8% combined); race-clean across atomic-rename, delete-and-recreate, debounce-coalesce, multi-subscriber, and concurrent-Lookup-during-reload paths.

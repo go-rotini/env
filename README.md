@@ -66,21 +66,152 @@ func main() {
 		log.Fatal(err)
 	}
 	fmt.Printf("%+v\n", cfg2)
-
-	// Live reload — readers see atomic snapshots.
-	live, err := env.NewLive[Config](env.WithSource(env.OSEnv()))
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer live.Close()
-	current := live.Get() // *Config — never nil after NewLive succeeds
-	fmt.Printf("%+v\n", current)
 }
 ```
+
+## Loading from a `.env` file
+
+The `env/dotenv` sub-package parses `.env` files into an `env.Source`:
+
+```go
+import (
+	"github.com/go-rotini/env"
+	"github.com/go-rotini/env/dotenv"
+)
+
+src, err := dotenv.NewSource(".env", dotenv.WithExpand())
+if err != nil { log.Fatal(err) }
+
+// OSEnv() listed first wins over the .env file (the standard Compose / Heroku
+// precedence model). Reverse the order to make the file authoritative.
+loader := env.New(env.WithSource(env.OSEnv(), src))
+
+var cfg Config
+if err := loader.Load(&cfg); err != nil {
+	log.Fatal(env.FormatError(err))
+}
+```
+
+## Live reload
+
+`Live[T]` wraps the loader in an `atomic.Pointer[T]`-backed handle. Reads are
+O(1) and lock-free; readers always observe a complete, validated snapshot.
+Pair it with the fsnotify-backed watcher for automatic reload on file edits:
+
+```go
+import (
+	"github.com/go-rotini/env"
+	"github.com/go-rotini/env/dotenv/watcher"
+)
+
+watch, err := watcher.New(".env")
+if err != nil { log.Fatal(err) }
+defer watch.Close()
+
+live, err := env.NewLive[Config](env.WithSource(env.OSEnv(), watch))
+if err != nil { log.Fatal(err) }
+defer live.Close()
+
+// Hot-path read.
+go func() {
+	for {
+		cfg := live.Get() // *Config — never nil after NewLive succeeds
+		serve(cfg)
+	}
+}()
+
+// Optional event observation.
+go func() {
+	for ev := range live.Events() {
+		if ev.Err != nil {
+			log.Printf("reload failed: %v", ev.Err)
+			continue
+		}
+		log.Printf("reload: changed=%v", ev.Changed)
+	}
+}()
+```
+
+The watcher debounces fsnotify burst events (default 75ms) and handles the
+"editor atomic save" pattern (write-temp-then-rename) by watching the parent
+directory and filtering by filename.
+
+## Auto-generated documentation
+
+`Describe` / `PrintUsage` / `Markdown` walk the same field pipeline as `Load`
+but emit documentation instead of populating a struct. Wire them into a
+`--env-help` flag or a docs-generation step:
+
+```go
+// Print a column-aligned help table to stderr.
+_ = env.PrintUsage(os.Stderr, &Config{})
+
+// Generate a GitHub-Flavored Markdown reference.
+_ = env.Markdown(os.Stdout, &Config{})
+```
+
+## Reverse direction (Encode)
+
+`Encode` writes a struct out as `KEY=VALUE` lines — useful for child-process
+env, audit snapshots, or generating an example `.env.dist` file:
+
+```go
+// Default redacts secrets as ***.
+_ = env.Encode(os.Stdout, &cfg)
+
+// For child-process exec.
+buf := &bytes.Buffer{}
+_ = env.Encode(buf, &cfg, env.WithEncodeIncludeSecrets(true))
+cmd.Env = strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+```
+
+For lossless `.env` editing (preserving comments and original quoting), use
+`dotenv.Parse` → `(*File).Set` → `(*File).Marshal` instead — `Encode` is a
+struct-to-text path and does not preserve formatting.
+
+## Multiple sources and precedence
+
+Source chains are explicit and ordered — the first source to return ok=true
+wins. The cleanest mental model is "process env wins over `.env` file unless
+told otherwise" — list `OSEnv()` first:
+
+```go
+loader := env.New(env.WithSource(
+	env.OSEnv(),                                    // wins by default
+	mustDotenv(".env.local"),                       // dev overrides
+	mustDotenv(".env"),                             // baseline
+))
+```
+
+`WithSourceAppend` and `WithSourcePrepend` adjust an existing chain without
+replacing it.
+
+## Validation
+
+Implement `Validate() error` on the config type for cross-field rules. The
+loader invokes it after every field has populated and reports its return value
+through the standard `MultiError` aggregation:
+
+```go
+func (c *Config) Validate() error {
+	if c.Port < 1024 && os.Geteuid() != 0 {
+		return fmt.Errorf("PORT %d requires root", c.Port)
+	}
+	return nil
+}
+```
+
+On reload, the validator runs against the new candidate; failure retains the
+previous value.
 
 ## Documentation
 
 Full API reference is available on [pkg.go.dev](https://pkg.go.dev/github.com/go-rotini/env).
+
+The package's design rationale and edge-case catalogue live in
+[`.docs/ENV_PACKAGE_REQUIREMENTS.md`](.docs/ENV_PACKAGE_REQUIREMENTS.md) — read
+§12 ("Edge Cases, Traps & Implementation Notes") before integrating in
+production.
 
 ## Contributing
 
