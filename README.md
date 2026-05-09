@@ -208,11 +208,6 @@ previous value.
 
 Full API reference is available on [pkg.go.dev](https://pkg.go.dev/github.com/go-rotini/env).
 
-The package's design rationale and edge-case catalogue live in
-[`.docs/ENV_PACKAGE_REQUIREMENTS.md`](.docs/ENV_PACKAGE_REQUIREMENTS.md) — read
-§12 ("Edge Cases, Traps & Implementation Notes") before integrating in
-production.
-
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on how to contribute to this project.
