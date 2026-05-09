@@ -1,0 +1,160 @@
+package env
+
+import (
+	"log/slog"
+	"reflect"
+)
+
+// Option configures a [Loader]. Apply via [New] or via [LoadTo].
+type Option func(*loaderOptions)
+
+// loaderOptions holds the resolved configuration for a Loader. Fields are
+// unexported; Option functions are the only way to set them.
+type loaderOptions struct {
+	sources        []Source
+	prefix         string
+	tagName        string
+	fieldNameXform func(string) string
+	relaxedNames   bool
+	requireAll     bool
+	logger         *slog.Logger
+	customDecoders map[reflect.Type]customDecoderFn
+}
+
+// customDecoderFn is the dispatcher signature for decoders registered via
+// [WithCustomDecoder]. It receives the resolved string value and an
+// addressable [reflect.Value] of the registered type.
+type customDecoderFn func(s string, dst reflect.Value) error
+
+// defaultLoaderOptions returns the zero-config defaults.
+func defaultLoaderOptions() loaderOptions {
+	return loaderOptions{
+		sources:        []Source{OSEnv()},
+		tagName:        "env",
+		fieldNameXform: toScreamingSnake,
+	}
+}
+
+// WithSource REPLACES the loader's source chain. The default loader uses
+// only [OSEnv]. To layer additional sources behind OS env, list them
+// explicitly: env.WithSource(env.OSEnv(), dotenvSrc). Sources are
+// consulted in order; the first to return ok=true wins.
+//
+// An empty argument list is valid and produces a loader whose source
+// chain has no entries (lookups always return ("", false)).
+func WithSource(srcs ...Source) Option {
+	return func(o *loaderOptions) {
+		dup := make([]Source, len(srcs))
+		copy(dup, srcs)
+		o.sources = dup
+	}
+}
+
+// WithSourceAppend adds src to the END of the existing source chain. The
+// appended source has the LOWEST precedence (consulted only when no
+// earlier source returns ok=true).
+func WithSourceAppend(src Source) Option {
+	return func(o *loaderOptions) {
+		o.sources = append(o.sources, src)
+	}
+}
+
+// WithSourcePrepend adds src to the FRONT of the existing source chain.
+// The prepended source has the HIGHEST precedence.
+func WithSourcePrepend(src Source) Option {
+	return func(o *loaderOptions) {
+		o.sources = append([]Source{src}, o.sources...)
+	}
+}
+
+// WithPrefix prepends prefix to every resolved env-var name. Applied
+// before any tag-supplied envPrefix on nested structs.
+func WithPrefix(prefix string) Option {
+	return func(o *loaderOptions) {
+		o.prefix = prefix
+	}
+}
+
+// WithTagName overrides the struct tag name the loader recognizes.
+// Default is "env". Set to "envconfig" for caarlos0/envconfig-style
+// migrations. Does not affect the separate envDesc / envPrefix companion
+// tags, which always use those names.
+//
+// Loaders configured with a non-default tag name bypass the per-type
+// field-info cache and re-walk the struct on every Load.
+func WithTagName(name string) Option {
+	return func(o *loaderOptions) {
+		o.tagName = name
+	}
+}
+
+// WithFieldNameTransform overrides the default SCREAMING_SNAKE_CASE
+// transform applied to fields without an explicit tag name. The function
+// receives the exact Go field name and returns the env-var name.
+//
+// Loaders configured with a custom transform bypass the per-type
+// field-info cache and re-walk the struct on every Load.
+func WithFieldNameTransform(fn func(goFieldName string) string) Option {
+	return func(o *loaderOptions) {
+		if fn != nil {
+			o.fieldNameXform = fn
+		}
+	}
+}
+
+// WithRelaxedNames accepts identifiers containing characters outside the
+// POSIX [A-Za-z_][A-Za-z0-9_]* class (hyphens, dots, non-ASCII). Default
+// is POSIX-strict.
+//
+// In Phase 5 the option is recorded but not yet consulted; subordinate
+// sources (the dotenv parser added in Phase 9) read it to relax their
+// identifier validation. The OSEnv source has no notion of "validity"
+// beyond what the OS itself accepts and is unaffected.
+func WithRelaxedNames() Option {
+	return func(o *loaderOptions) {
+		o.relaxedNames = true
+	}
+}
+
+// WithRequireAll inverts the default optional-by-default policy. With
+// WithRequireAll set, every untagged field becomes implicitly required
+// unless it has a default= tag option. Useful for paranoid configs where
+// forgetting a value should fail closed.
+func WithRequireAll() Option {
+	return func(o *loaderOptions) {
+		o.requireAll = true
+	}
+}
+
+// WithLogger directs non-fatal diagnostics emitted by the loader to l.
+// Default is a no-op logger; the option is recorded for use by the
+// Mutator chain (Phase 7) and the Watcher poll loop (Phase 11).
+func WithLogger(l *slog.Logger) Option {
+	return func(o *loaderOptions) {
+		o.logger = l
+	}
+}
+
+// WithCustomDecoder registers a custom decoder for type T. It runs at the
+// top of the decoder priority chain, ahead of [Unmarshaler],
+// [encoding.TextUnmarshaler], [encoding.BinaryUnmarshaler], and the
+// built-in registry. Useful for overriding decoding for types that
+// already implement one of those interfaces.
+//
+// The function receives the resolved string value and a pointer to the
+// destination of type T; it should populate *T and return nil on
+// success.
+func WithCustomDecoder[T any](fn func(s string, dst *T) error) Option {
+	return func(o *loaderOptions) {
+		if o.customDecoders == nil {
+			o.customDecoders = make(map[reflect.Type]customDecoderFn)
+		}
+		typ := reflect.TypeFor[T]()
+		o.customDecoders[typ] = func(s string, dst reflect.Value) error {
+			// The loader looks up the decoder by exact type, so the
+			// destination is always *T; the type assertion is forced.
+			ptr, _ := dst.Addr().Interface().(*T)
+			return fn(s, ptr)
+		}
+	}
+}

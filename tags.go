@@ -91,7 +91,11 @@ func collectStructInfo(t reflect.Type) *structInfo {
 			Err: fmt.Errorf("got %s: %w", t, ErrNotStruct),
 		}
 	}
-	w := walker{seen: make(map[string]string)}
+	w := walker{
+		seen:           make(map[string]string),
+		tagName:        "env",
+		fieldNameXform: toScreamingSnake,
+	}
 	w.walk(t, nil, "", "")
 	return &structInfo{
 		Fields: w.fields,
@@ -103,10 +107,17 @@ func collectStructInfo(t reflect.Type) *structInfo {
 // accumulated descriptor list, the seen-key map for conflict detection,
 // and the error list. Pointer-receiver methods are used throughout so the
 // recursion mutates the same instance.
+//
+// tagName and fieldNameXform are configurable; the package-default cache
+// path uses "env" and toScreamingSnake. Loaders configured with
+// [WithTagName] or [WithFieldNameTransform] construct a walker with
+// custom values and bypass the cache.
 type walker struct {
-	fields []fieldDescriptor
-	seen   map[string]string
-	errs   []error
+	fields         []fieldDescriptor
+	seen           map[string]string
+	errs           []error
+	tagName        string
+	fieldNameXform func(string) string
 }
 
 // walk recursively walks t, populating w.fields and w.errs.
@@ -121,7 +132,7 @@ func (w *walker) walk(t reflect.Type, parentIndex []int, parentPrefix, parentGoP
 			continue
 		}
 
-		envTag, hasEnvTag := f.Tag.Lookup("env")
+		envTag, hasEnvTag := f.Tag.Lookup(w.tagName)
 		if hasEnvTag && envTag == "-" {
 			continue
 		}
@@ -177,7 +188,7 @@ func (w *walker) walk(t reflect.Type, parentIndex []int, parentPrefix, parentGoP
 		if tag.Name != "" {
 			key = parentPrefix + tag.Name
 		} else {
-			key = parentPrefix + toScreamingSnake(f.Name)
+			key = parentPrefix + w.fieldNameXform(f.Name)
 		}
 
 		if existing, dup := w.seen[key]; dup {

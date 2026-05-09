@@ -4,6 +4,7 @@ import (
 	"encoding"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"reflect"
@@ -26,6 +27,18 @@ type decodeOpts struct {
 	Layout      string
 	Base64      bool
 	Hex         bool
+}
+
+// decodeOptsFromDescriptor extracts the decoder-relevant options from a
+// fieldDescriptor.
+func decodeOptsFromDescriptor(d fieldDescriptor) decodeOpts {
+	return decodeOpts{
+		Separator:   d.Separator,
+		KVSeparator: d.KVSeparator,
+		Layout:      d.Layout,
+		Base64:      d.Base64,
+		Hex:         d.Hex,
+	}
 }
 
 // Type cache for built-in special handling. Only types actually special-
@@ -244,9 +257,11 @@ func decodeBytes(dst reflect.Value, text string, opts decodeOpts) error {
 	}
 	// reflect.Array: enforce length.
 	if len(data) != dst.Len() {
-		return fmt.Errorf(
-			"%w: %s: got %d bytes, want %d",
-			ErrParse, dst.Type(), len(data), dst.Len())
+		return &ParseError{
+			Value: text,
+			Type:  dst.Type().String(),
+			Cause: fmt.Errorf("%w: got %d bytes, want %d", errBytesLengthMismatch, len(data), dst.Len()),
+		}
 	}
 	reflect.Copy(dst, reflect.ValueOf(data))
 	return nil
@@ -282,9 +297,11 @@ func decodeArrayNonByte(dst reflect.Value, text string, opts decodeOpts) error {
 		parts = strings.Split(text, sep)
 	}
 	if len(parts) != dst.Len() {
-		return fmt.Errorf(
-			"%w: %s: got %d elements, want %d",
-			ErrParse, dst.Type(), len(parts), dst.Len())
+		return &ParseError{
+			Value: text,
+			Type:  dst.Type().String(),
+			Cause: fmt.Errorf("%w: got %d elements, want %d", errArrayLengthMismatch, len(parts), dst.Len()),
+		}
 	}
 	elemOpts := decodeOpts{Layout: opts.Layout}
 	for i, p := range parts {
@@ -314,9 +331,11 @@ func decodeMap(dst reflect.Value, text string, opts decodeOpts) error {
 	for _, pair := range pairs {
 		k, v, ok := strings.Cut(pair, kvSep)
 		if !ok {
-			return fmt.Errorf(
-				"%w: %s: entry %q missing kv separator %q",
-				ErrParse, dst.Type(), pair, kvSep)
+			return &ParseError{
+				Value: text,
+				Type:  dst.Type().String(),
+				Cause: fmt.Errorf("%w %q in entry %q", errMissingKVSeparator, kvSep, pair),
+			}
 		}
 		keyHolder := reflect.New(keyType)
 		if err := decodeValue(keyHolder.Elem(), k, decodeOpts{}); err != nil {
@@ -332,6 +351,16 @@ func decodeMap(dst reflect.Value, text string, opts decodeOpts) error {
 	return nil
 }
 
+// Decoder-internal sentinel errors used as wrapped causes. The decoder's
+// public surface always reports a [*ParseError]; these sentinels appear
+// inside the Cause chain and are reachable via [errors.Is].
+var (
+	errInvalidBool         = errors.New("invalid boolean")
+	errBytesLengthMismatch = errors.New("byte length mismatch")
+	errArrayLengthMismatch = errors.New("element count mismatch")
+	errMissingKVSeparator  = errors.New("missing kv separator")
+)
+
 // parseBool implements the spec's tolerant bool parser: case-insensitive
 // true/false plus 1/0, yes/no, on/off.
 func parseBool(s string) (bool, error) {
@@ -341,15 +370,18 @@ func parseBool(s string) (bool, error) {
 	case "false", "0", "no", "off":
 		return false, nil
 	}
-	return false, fmt.Errorf("invalid boolean %q: %w", s, ErrParse)
+	return false, fmt.Errorf("%w: %q", errInvalidBool, s)
 }
 
-// wrapDecodeErr wraps a low-level decode failure with the target type and
-// offending text plus the [ErrParse] sentinel for [errors.Is] testing.
-// Phase 5's loader will wrap this further with the field's Go path and
-// resolved env-var key.
+// wrapDecodeErr wraps a low-level decode failure as a [*ParseError]. The
+// Field, Key, and Pos fields are left empty; the loader fills them in
+// after the decoder returns.
 func wrapDecodeErr(typ reflect.Type, text string, cause error) error {
-	return fmt.Errorf("%w: cannot parse %q as %s: %w", ErrParse, text, typ, cause)
+	return &ParseError{
+		Value: text,
+		Type:  typ.String(),
+		Cause: cause,
+	}
 }
 
 // separatorOr returns sep when non-empty, else fallback.
