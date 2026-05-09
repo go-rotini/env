@@ -1,0 +1,7 @@
+{
+  "result": {
+    "DATABASE_URL": "postgres://localhost/app",
+    "RAILS_ENV":    "development"
+  },
+  "error": null
+}

@@ -1,0 +1,8 @@
+{
+  "result": {
+    "COMPOSE_PROJECT_NAME": "myapp",
+    "TAG":                  "v1.2.3",
+    "DATA_DIR":             "./data"
+  },
+  "error": null
+}

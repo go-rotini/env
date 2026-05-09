@@ -1,0 +1,8 @@
+{
+  "result": {
+    "FOO":        "bar",
+    "EMPTY":      "",
+    "WHITESPACE": "trimmed"
+  },
+  "error": null
+}

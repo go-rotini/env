@@ -1,0 +1,8 @@
+{
+  "result": {
+    "USER":         "alice",
+    "LITERAL":      "hello $USER",
+    "INTERPOLATED": "hello alice"
+  },
+  "error": null
+}

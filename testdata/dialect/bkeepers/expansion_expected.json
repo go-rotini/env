@@ -1,0 +1,8 @@
+{
+  "result": {
+    "USER":     "alice",
+    "GREETING": "hello-alice",
+    "HOME_DIR": "/tmp/default"
+  },
+  "error": null
+}
