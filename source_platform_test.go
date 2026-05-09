@@ -7,8 +7,7 @@ import (
 	"github.com/go-rotini/env"
 )
 
-// Cross-platform OSEnv tests. These match the platform-specific
-// behavior matrix documented in §8.6 of the design doc:
+// Cross-platform OSEnv tests:
 //
 //	Ubuntu / macOS — POSIX, case-sensitive identifiers.
 //	Windows        — case-insensitive identifiers; `=C:`-style hidden
@@ -53,7 +52,7 @@ func TestWindowsCaseInsensitive(t *testing.T) {
 
 // TestWindowsHiddenVars verifies that the leading-`=` per-drive
 // hidden variables Windows exposes via os.Environ are filtered by
-// OSEnv().Lookup so callers never observe them. Documented in §2.1.4.
+// OSEnv().Lookup so callers never observe them.
 func TestWindowsHiddenVars(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows-only behavior")

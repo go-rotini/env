@@ -153,8 +153,8 @@ func TestDecode_IntInvalid(t *testing.T) {
 }
 
 func TestDecode_IntEmpty(t *testing.T) {
-	// Per spec: "Numeric, bool, time.Duration: parsing the empty string is
-	// an error." Use a pointer type for optionality.
+	// Numeric, bool, and time.Duration treat the empty string as a
+	// parse error; for optionality, declare the field as a pointer.
 	_, err := decodeInto[int](t, "", decodeOpts{})
 	if err == nil {
 		t.Fatal("expected error parsing empty string as int")

@@ -1,13 +1,13 @@
 // Package dotenv parses `.env` files and exposes them as
 // [github.com/go-rotini/env.Source] values.
 //
-// The package targets the conservative portable subset described in
-// the env package's requirements doc (§2.2.7) — every dialect-specific
-// extension (the `export ` prefix, YAML-style `KEY: value`, backtick
-// quoting, variable expansion, multi-line double-quoted strings) is
-// supported but gated behind explicit ParseOptions or, for non-portable
-// constructs that nonetheless parse, surfaced as [LintIssue]
-// SeverityWarning entries from [Lint].
+// The package targets a conservative portable subset of the `.env`
+// dialects in the wild. Every dialect-specific extension (the
+// `export ` prefix, YAML-style `KEY: value`, backtick quoting, variable
+// expansion, multi-line double-quoted strings) is supported but gated
+// behind explicit ParseOptions or, for non-portable constructs that
+// nonetheless parse, surfaced as [LintIssue] SeverityWarning entries
+// from [Lint].
 //
 // # API summary
 //

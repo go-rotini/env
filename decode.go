@@ -47,10 +47,10 @@ func decodeOptsFromDescriptor(d fieldDescriptor) decodeOpts {
 // big.Int, big.Float, big.Rat) don't need a precomputed reflect.Type.
 //
 // Specifically: regexp.Regexp's pointer receiver implements TextUnmarshaler
-// since Go 1.21, so it is handled by the interface chain even though the
-// requirements doc lists it as a "built-in special". The behavior is
-// equivalent (regexp.UnmarshalText calls Compile), so we let the interface
-// chain handle it for free.
+// since Go 1.21, so it is handled by the interface chain even though it is
+// nominally a "built-in special". The behavior is equivalent
+// (regexp.UnmarshalText calls Compile), so we let the interface chain handle
+// it for free.
 var (
 	timeTimeType     = reflect.TypeFor[time.Time]()
 	timeDurationType = reflect.TypeFor[time.Duration]()
@@ -361,7 +361,7 @@ var (
 	errMissingKVSeparator  = errors.New("missing kv separator")
 )
 
-// parseBool implements the spec's tolerant bool parser: case-insensitive
+// parseBool implements a tolerant bool parser: case-insensitive
 // true/false plus 1/0, yes/no, on/off.
 func parseBool(s string) (bool, error) {
 	switch strings.ToLower(s) {

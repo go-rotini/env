@@ -31,8 +31,10 @@ func (s Severity) String() string {
 	return "unknown"
 }
 
-// LintIssue describes a single deviation from the portable `.env` subset
-// (per §2.2.7 of the package requirements doc).
+// LintIssue describes a single deviation from the portable `.env` subset.
+// Constructs flagged include the `export ` prefix, YAML-style `KEY: value`
+// separator, identifiers outside the POSIX [A-Za-z_][A-Za-z0-9_]* class,
+// and backtick-quoted values.
 type LintIssue struct {
 	Pos      env.Position
 	Rule     string

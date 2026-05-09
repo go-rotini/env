@@ -13,8 +13,6 @@ import (
 // drawn from popular tools. The fixtures live in
 // testdata/acceptance/{name}.env and are checked into the repo so
 // behavior changes are diff-visible.
-//
-// Spec: §8.3.
 
 // acceptanceFixtures lists every fixture and the parse options it
 // expects. Fixtures whose semantics rely on `$VAR` interpolation

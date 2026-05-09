@@ -14,8 +14,7 @@ import (
 //  3. For round-trip fuzzers: Parse → Marshal → Parse produces the
 //     same effective key/value map.
 //
-// Spec: §8.4. Seed corpora live in testdata/fuzz/{TestName}/ at the
-// module root.
+// Seed corpora live in dotenv/testdata/fuzz/{TestName}/.
 
 // scannerSeeds covers BOM/CRLF/quoting/escape/expansion forms plus
 // known regression cases.

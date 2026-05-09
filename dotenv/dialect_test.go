@@ -17,9 +17,8 @@ import (
 // options so the test mirrors the behavior a user would observe in
 // the real tool.
 //
-// Spec: §8.2. Fixtures are vendored (not cloned at build time)
-// because none of the upstream projects publishes a versioned
-// standalone test corpus.
+// Fixtures are vendored (not cloned at build time) because none of
+// the upstream projects publishes a versioned standalone test corpus.
 func TestDialectCompat(t *testing.T) {
 	t.Parallel()
 	root := dialectRoot(t)

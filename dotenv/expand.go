@@ -89,10 +89,11 @@ func expandWithDepth(s string, pos env.Position, opts parseOptions, resolved map
 			// dropped silently (should never happen in practice).
 			i++
 		case '\\':
-			// `\$` in unquoted values isn't a special escape per spec
-			// (unquoted has no escape interpretation), but accept it
-			// here as a courtesy: if WithExpand is on, we treat `\$`
-			// as suppressing expansion of the following identifier.
+			// `\$` in unquoted values isn't a recognized dialect escape
+			// (unquoted values normally have no escape interpretation),
+			// but accept it here as a courtesy: if WithExpand is on, we
+			// treat `\$` as suppressing expansion of the following
+			// identifier.
 			if i+1 < len(s) && s[i+1] == '$' {
 				b.WriteByte('$')
 				i += 2

@@ -14,8 +14,6 @@ import (
 // a struct shaped like the fixture's data. This catches regressions in
 // the LOADER's interaction with dotenv that the dotenv-internal tests
 // in [dotenv/acceptance_test.go] would not.
-//
-// Spec: §8.3.
 
 func acceptanceEnvPath(name string) string {
 	return filepath.Join("testdata", "acceptance", name+".env")

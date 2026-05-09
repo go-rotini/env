@@ -295,9 +295,12 @@ func (l *Loader) populateField(ctx context.Context, root reflect.Value, fd field
 }
 
 // maybeUnset honors the unset tag option after a successful decode. The
-// global [WithoutUnset] disables the behavior. Calls os.Unsetenv with
-// the inherent thread-safety caveat documented at §12.14: callers using
-// the unset tag accept that the loader does an os-level write.
+// global [WithoutUnset] disables the behavior. Calls os.Unsetenv, which is
+// not thread-safe under cgo (POSIX setenv(3) / unsetenv(3) can race with
+// concurrent getaddrinfo via GODEBUG=netdns=cgo); callers using the unset
+// tag accept that the loader does an os-level write. The loader serializes
+// these calls within a single Load — perform initial Load before spawning
+// goroutines that may trigger cgo lookups.
 func (l *Loader) maybeUnset(fd fieldDescriptor, resolvedKey string) {
 	if !fd.Unset || l.opts.withoutUnset {
 		return

@@ -64,14 +64,13 @@
 // Supported options: required, notEmpty, default=value, separator=char,
 // kvSeparator=char, expand, fromFile, secret, immutable, layout=format,
 // base64, hex, unset. Companion tags: envDesc:"..." for free-text help and
-// envPrefix:"PFX_" on nested struct fields. See the package README and the
-// requirements document for the full table.
+// envPrefix:"PFX_" on nested struct fields. See the package README for the
+// full table.
 //
 // # Pitfalls
 //
-// Environment variables come with platform-specific quirks. The list below is
-// the curated subset most likely to bite a new user; the full catalog lives
-// in §12 of the package's design document.
+// Environment variables come with platform-specific quirks. The list below
+// covers the issues most likely to bite a new user.
 //
 // OS-level:
 //

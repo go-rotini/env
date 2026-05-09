@@ -18,7 +18,7 @@ import (
 //	3. Errors are fine — Load returning an error on bad input is
 //	   the expected, well-behaved outcome.
 //
-// Spec: §8.4. Seed corpora live in testdata/fuzz/{TestName}/.
+// Seed corpora live in testdata/fuzz/{TestName}/.
 
 // FuzzLoader exercises the loader pipeline with arbitrary key/value
 // bytes against a struct that covers the four most common decode
