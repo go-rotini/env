@@ -45,22 +45,18 @@ type Change struct {
 	Keys []string
 }
 
-// OSEnv returns a Source that reads from [os.LookupEnv]. Subsequent calls
-// return the same value (a package-level singleton); the source itself is
+// OSEnv returns a Source backed by [os.LookupEnv]. The source is
 // stateless and reflects the live process environment on every Lookup.
 //
 // On Windows, [os.LookupEnv] folds variable names to uppercase for
-// comparison, matching the platform's case-insensitive convention. On
-// POSIX systems names are case-sensitive.
+// comparison; on POSIX systems names are case-sensitive.
 //
-// Lookup explicitly rejects degenerate keys (empty, leading "=", containing
-// "=" or NUL) without consulting the OS, so callers passing such keys
-// always observe ok=false rather than triggering platform-specific edge
-// cases (Windows "=C:"-style hidden per-drive variables, for instance).
+// Lookup rejects degenerate keys (empty, leading "=", containing "="
+// or NUL) without consulting the OS, so callers passing such keys
+// always observe ok=false instead of triggering platform-specific edge
+// cases like Windows "=C:" per-drive hidden variables.
 func OSEnv() Source { return osEnvSource }
 
-// osEnvSource is the singleton returned by every OSEnv() call. The empty
-// struct value carries no state; all behavior lives in the Lookup method.
 var osEnvSource Source = osEnvType{}
 
 type osEnvType struct{}
@@ -155,15 +151,12 @@ func (m *multiSource) Lookup(key string) (string, bool) {
 	return "", false
 }
 
-// emptySource is the Source returned by Multi() with no arguments. Lookup
-// is the only method; it always reports the key as unset.
 type emptySource struct{}
 
 func (emptySource) Lookup(string) (string, bool) { return "", false }
 
-// asciiUpper returns s with each ASCII lowercase byte folded to uppercase.
-// Non-ASCII bytes are preserved verbatim. This matches the case-folding
-// semantics Go's runtime applies to Windows env-var name comparison.
+// asciiUpper folds ASCII lowercase to uppercase and leaves non-ASCII
+// bytes unchanged, matching the runtime's Windows env-var case folding.
 func asciiUpper(s string) string {
 	needFold := false
 	for i := range len(s) {

@@ -5,11 +5,10 @@ import (
 	"strings"
 )
 
-// Marshal returns the file's source representation. For canonical inputs
-// (entries unmutated since parse), the result is byte-exact with the
-// original input. For mutated entries (via [File.Set]), the new key=value
-// line is freshly rendered with default quoting; surrounding entries
-// retain their original bytes.
+// Marshal returns the file's source representation. For unmutated
+// inputs the result is byte-exact with the original; mutated entries
+// (via [File.Set]) are freshly rendered with default quoting while
+// surrounding entries retain their original bytes.
 func (f *File) Marshal() ([]byte, error) {
 	if f == nil {
 		return nil, nil
@@ -21,10 +20,9 @@ func (f *File) Marshal() ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// renderAssignmentLine produces the source bytes for a fresh assignment.
-// Sensible defaults: bare value when safe, double-quoted with the
-// standard escape table otherwise. The line is terminated by ending
-// (typically "\n").
+// renderAssignmentLine produces source bytes for a fresh assignment:
+// bare value when safe, double-quoted otherwise. The line is
+// terminated by ending (typically "\n").
 func renderAssignmentLine(key, value, ending string) []byte {
 	var b bytes.Buffer
 	b.WriteString(key)
@@ -34,7 +32,6 @@ func renderAssignmentLine(key, value, ending string) []byte {
 	return b.Bytes()
 }
 
-// formatValue chooses bare or double-quoted emission for value.
 func formatValue(value string) string {
 	if !needsQuoting(value) {
 		return value
@@ -42,10 +39,10 @@ func formatValue(value string) string {
 	return quoteValue(value)
 }
 
-// needsQuoting reports whether value must be wrapped in double quotes.
-// The rule is conservative: any character that would alter line
-// tokenization (whitespace, `#`, `$`, `'`, `"`, backslash, backtick) or
-// any control character forces quoting.
+// needsQuoting reports whether value must be double-quoted. Any
+// character that would alter line tokenization (whitespace, `#`, `$`,
+// quotes, backslash, backtick) or any control character forces
+// quoting.
 func needsQuoting(value string) bool {
 	if value == "" {
 		return false
@@ -64,9 +61,8 @@ func needsQuoting(value string) bool {
 	return false
 }
 
-// quoteValue produces a double-quoted form of value with the standard
-// escape table applied. The result is parseable by both this package
-// and joho/godotenv.
+// quoteValue double-quotes value with the standard escape table.
+// Output is parseable by this package and by joho/godotenv.
 func quoteValue(value string) string {
 	var b strings.Builder
 	b.Grow(len(value) + 2)

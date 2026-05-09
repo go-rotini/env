@@ -856,7 +856,7 @@ func TestDecode_Unsupported_StructWithoutInterface(t *testing.T) {
 	}
 }
 
-// --- context interface (defined; not invoked by Phase 4 decoder) ---
+// --- context interface (not invoked by the value-decoder layer) ---
 
 type ctxUnmarshaler struct{ got string }
 
@@ -866,15 +866,12 @@ func (c *ctxUnmarshaler) UnmarshalEnv(_ context.Context, s string) error {
 }
 
 func TestDecode_UnmarshalerContext_NotInvokedYet(t *testing.T) {
-	// Phase 4 does not invoke UnmarshalerContext; that wiring lives in
-	// Phase 5 (Loader.LoadContext). A type that ONLY implements
-	// UnmarshalerContext (not Unmarshaler) currently falls through every
-	// interface check and lands in default reflection. Because the type
-	// is a struct with no interface satisfaction and no built-in
-	// registration, the decoder should report ErrUnsupportedType.
+	// UnmarshalerContext is consulted by [Loader.LoadContext], not by
+	// the value-decoder; a type implementing only UnmarshalerContext
+	// falls through to default reflection here.
 	got, err := decodeInto[ctxUnmarshaler](t, "x", decodeOpts{})
 	if !errors.Is(err, ErrUnsupportedType) {
-		t.Errorf("err = %v, want ErrUnsupportedType (UnmarshalerContext is wired in Phase 5)", err)
+		t.Errorf("err = %v, want ErrUnsupportedType", err)
 	}
 	_ = got
 }

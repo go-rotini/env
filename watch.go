@@ -9,53 +9,47 @@ import (
 	"time"
 )
 
-// Event is one element delivered on the channel returned by
-// [Loader.Watch] or by [Live.Events]. Each Event corresponds to one
-// reload attempt — successful or failed.
+// Event is delivered on the channel returned by [Loader.Watch] or by
+// [Live.Events]. One Event corresponds to one reload attempt —
+// successful or failed.
 type Event struct {
-	// Changed lists the env-var names whose resolved values differ from
-	// the snapshot taken before this reload. The list is sorted and
-	// deduplicated. On a failed reload (Err != nil) Changed is empty;
-	// on a successful but no-op reload Changed is also empty.
+	// Changed lists the env-var names whose resolved values differ
+	// from the snapshot taken before this reload, sorted and
+	// deduplicated. Empty on a failed or no-op reload.
 	Changed []string
 
-	// Err is non-nil when the reload failed. The previously-loaded
-	// value is retained on failure.
+	// Err is non-nil on failed reload; the previously-loaded value is
+	// retained.
 	Err error
 
 	// Time is the wall-clock time the reload completed.
 	Time time.Time
 }
 
-// ErrWatcherClosed is returned by [Live.Reload] when called on a Live
-// whose worker goroutine has already exited.
+// ErrWatcherClosed is returned by [Live.Reload] when the worker
+// goroutine has already exited.
 var ErrWatcherClosed = errors.New("env: watcher closed")
 
 // ErrNilContext is returned when a watch / load call receives a nil
-// context. Surfaces from [Loader.Watch] and friends; callers can match
-// it via [errors.Is].
+// context.
 var ErrNilContext = errors.New("env: nil context")
 
-// Watch begins live reload. The supplied v must be a non-nil pointer to
-// a struct (the same shape constraints as [Loader.Load] / [Loader.LoadContext]).
-// Watch performs an initial Load synchronously; if that fails the
-// returned channel is nil and the error is returned.
+// Watch starts live reload. v must be a non-nil pointer to a struct
+// (same constraints as [Loader.Load]). Watch performs an initial Load
+// synchronously; on failure it returns a nil channel and the error.
 //
-// On every subsequent change pushed by a [Watcher]-implementing source
-// — or every poll tick if [WithPollInterval] is configured — Watch
-// builds a fresh candidate of the same type as v, runs the full load
-// pipeline (mutators, validation, fromFile, decode), compares the new
-// candidate's `immutable`-tagged values against the previous reload's
-// snapshot, and (on success) overwrites *v with the candidate values.
-// One [Event] is delivered to the returned channel per reload attempt.
+// On every change pushed by a [Watcher] source — or on every poll
+// tick when [WithPollInterval] is set — Watch builds a fresh
+// candidate of v's type, runs the full load pipeline, compares the
+// candidate's immutable-tagged values against the previous reload's
+// snapshot, and on success overwrites *v. One [Event] is delivered
+// per reload attempt; failures (validation, immutable, decode) deliver
+// an Event with Err set and leave *v unmodified.
 //
-// The channel is closed when ctx is canceled. Failures (validation
-// errors, immutable-field changes, decode errors) deliver an Event with
-// a non-nil Err and leave *v unmodified.
+// The channel is closed when ctx is canceled.
 //
-// v MUST NOT be read concurrently with the worker's writes; readers who
-// need lock-free, torn-read-free access should use [NewLive] instead,
-// which atomically swaps an internal pointer.
+// v must NOT be read concurrently with the worker's writes. For
+// lock-free, torn-read-free reads use [NewLive] instead.
 func (l *Loader) Watch(ctx context.Context, v any) (<-chan Event, error) {
 	if ctx == nil {
 		return nil, ErrNilContext
@@ -95,7 +89,6 @@ func (l *Loader) Watch(ctx context.Context, v any) (<-chan Event, error) {
 		if err != nil {
 			return reloadOutcome{err: err}
 		}
-		// Commit: copy candidate → v.
 		rv.Elem().Set(candidate.Elem())
 		changed := diffSnapshots(prevAll, newAll)
 		prevAll = newAll
@@ -108,17 +101,15 @@ func (l *Loader) Watch(ctx context.Context, v any) (<-chan Event, error) {
 	return eng.events, nil
 }
 
-// reloadOutcome is the result of one engine-driven reload attempt.
 type reloadOutcome struct {
 	changed []string
 	err     error
 }
 
-// engine is the shared worker that drives both [Loader.Watch] and
-// [Live]. It subscribes to every [Watcher]-implementing source in the
-// loader's chain, optionally polls non-Watcher sources, and serializes
-// reload calls through a single goroutine. Manual reload requests
-// (used by [Live.Reload]) are dispatched through manualCh.
+// engine is the shared worker for [Loader.Watch] and [Live]. It
+// subscribes to [Watcher] sources, optionally polls non-Watcher
+// sources, and serializes reloads through a single goroutine. Manual
+// requests from [Live.Reload] are dispatched through manualCh.
 type engine struct {
 	loader *Loader
 	events chan Event
@@ -136,15 +127,13 @@ type manualReloadReq struct {
 	resp chan error
 }
 
-// eventLogger interface narrows what the engine needs from a slog.Logger
-// so tests can replace it without bringing in slog. Discard logger is
-// the default when no [WithLogger] was applied.
+// eventLogger narrows what the engine needs from a [slog.Logger] so
+// tests can substitute without depending on slog.
 type eventLogger interface {
 	Warn(msg string, args ...any)
 	Debug(msg string, args ...any)
 }
 
-// nopLogger is the eventLogger used when WithLogger isn't set.
 type nopLogger struct{}
 
 func (nopLogger) Warn(string, ...any)  {}
@@ -166,8 +155,6 @@ func newEngine(l *Loader, reload func(ctx context.Context, sourceKeys []string) 
 	}
 }
 
-// start spawns the engine's worker goroutine and the per-source
-// forwarder goroutines.
 func (e *engine) start(ctx context.Context) {
 	for _, src := range e.loader.opts.sources {
 		w, ok := src.(Watcher)
@@ -184,12 +171,9 @@ func (e *engine) start(ctx context.Context) {
 	go e.run(ctx)
 }
 
-// forwardChanges relays Change events from one Watcher source onto the
-// engine's central source channel. Exits when sub is closed or ctx is
-// canceled. Non-blocking forwarding: if the central channel is full,
-// the change is dropped (the engine's debounce + idempotent reload
-// model treats every Change as "may have changed"; dropping individual
-// events at most delays detection of the keys that triggered them).
+// forwardChanges relays one Watcher source's events onto sourceCh,
+// dropping non-blockingly when sourceCh is full. Reloads are
+// idempotent, so a dropped Change at most delays detection.
 func (e *engine) forwardChanges(ctx context.Context, sub <-chan Change) {
 	for {
 		select {
@@ -210,9 +194,8 @@ func (e *engine) forwardChanges(ctx context.Context, sub <-chan Change) {
 	}
 }
 
-// run is the engine's serialization point. All reload work happens
-// here, on a single goroutine; this is what makes the immutable-field
-// comparison and the atomic-pointer store race-free.
+// run is the engine's serialization point: every reload happens here,
+// on a single goroutine.
 func (e *engine) run(ctx context.Context) {
 	defer close(e.doneCh)
 	defer close(e.events)
@@ -224,7 +207,6 @@ func (e *engine) run(ctx context.Context) {
 	var debC <-chan time.Time
 	armDeb := func() {
 		if debounce == 0 {
-			// Synchronous fire path — handled inline in the caller.
 			return
 		}
 		if debTimer == nil {
@@ -309,10 +291,8 @@ func (e *engine) run(ctx context.Context) {
 	}
 }
 
-// emit delivers ev to the events channel using a non-blocking send. If
-// the channel is full (a slow consumer is falling behind) the event is
-// dropped and a warning is logged. Buffered to 16 — comfortable headroom
-// for the typical "event observer" goroutine pattern.
+// emit delivers ev to the events channel non-blockingly; surplus
+// events are dropped (with a warning) when the consumer falls behind.
 func (e *engine) emit(ev Event) {
 	select {
 	case e.events <- ev:
@@ -322,9 +302,8 @@ func (e *engine) emit(ev Event) {
 	}
 }
 
-// requestReload triggers a synchronous reload through the worker. Used
-// by [Live.Reload]. Returns [ErrWatcherClosed] if the engine has
-// already exited.
+// requestReload triggers a synchronous reload through the worker.
+// Returns [ErrWatcherClosed] if the engine has already exited.
 func (e *engine) requestReload() error {
 	req := manualReloadReq{resp: make(chan error, 1)}
 	select {
@@ -335,9 +314,6 @@ func (e *engine) requestReload() error {
 	}
 }
 
-// keysOf returns the sorted slice of keys in m. Used to convert the
-// engine's pending-key set into the slice handed off to the reload
-// closure.
 func keysOf(m map[string]struct{}) []string {
 	if len(m) == 0 {
 		return nil
@@ -350,13 +326,10 @@ func keysOf(m map[string]struct{}) []string {
 	return out
 }
 
-// snapshotImmutable returns the resolved values for every immutable-
-// tagged field in the type t, keyed by the env-var name (with
-// [WithPrefix] applied). Reads from the loader's current source chain.
-// A field whose source returns ok=false and which has no default is
-// represented by the sentinel value `<unset>` to distinguish "set to
-// empty" (allowed across reloads) from "missing" (also allowed, but
-// distinct).
+// snapshotImmutable captures the resolved values of every
+// immutable-tagged field of t. Unset / no-default keys take the
+// [unsetSentinel] so the comparison can distinguish set-to-empty
+// from missing.
 func (l *Loader) snapshotImmutable(t reflect.Type) (map[string]string, error) {
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
@@ -385,8 +358,8 @@ func (l *Loader) snapshotImmutable(t reflect.Type) (map[string]string, error) {
 	return out, nil
 }
 
-// snapshotKnownKeys returns the resolved values for EVERY field in t,
-// for change-detection across reloads.
+// snapshotKnownKeys captures the resolved values of every field of t
+// for change detection across reloads.
 func (l *Loader) snapshotKnownKeys(t reflect.Type) (map[string]string, error) {
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
@@ -412,17 +385,12 @@ func (l *Loader) snapshotKnownKeys(t reflect.Type) (map[string]string, error) {
 	return out, nil
 }
 
-// unsetSentinel is the marker placed in immutable / known-key snapshots
-// for keys that are not set by any source AND have no default. Using a
-// distinct sentinel lets the immutable comparison treat
-// "<unset>" → "" and "" → "<unset>" as real changes (they are: the
-// field went from "no value, falls back to zero" to "explicitly empty",
-// which the loader treats as decode-with-empty).
+// unsetSentinel marks "no source value, no default" so the immutable
+// comparison treats "" → unset and unset → "" as real changes.
 const unsetSentinel = "\x00<unset>\x00"
 
-// compareImmutable returns a non-nil [*ImmutableChangedError] when the
-// new snapshot differs from the previous on any immutable key. Returns
-// nil when every immutable key is unchanged.
+// compareImmutable returns a non-nil [*ImmutableChangedError] when
+// next differs from prev on any immutable key.
 func compareImmutable(prev, next map[string]string) error {
 	for key, prevVal := range prev {
 		newVal, ok := next[key]
@@ -446,7 +414,7 @@ func compareImmutable(prev, next map[string]string) error {
 }
 
 // diffSnapshots returns the sorted union of keys whose resolved value
-// differs between prev and next. Used to populate Event.Changed.
+// differs between prev and next.
 func diffSnapshots(prev, next map[string]string) []string {
 	out := make([]string, 0)
 	for k, v := range next {

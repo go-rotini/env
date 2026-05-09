@@ -6,9 +6,9 @@ import (
 	"strings"
 )
 
-// Position identifies a location within source text. Zero-valued positions
-// (Line == 0) mean "no position info available"; most env-var errors do
-// not carry positions, only `.env` file errors do.
+// Position identifies a location within source text. A zero value
+// (Line == 0) means no position is available; only `.env` parse errors
+// carry positions.
 type Position struct {
 	File   string
 	Line   int
@@ -16,6 +16,8 @@ type Position struct {
 	Offset int
 }
 
+// String renders p as "file:line:column" when File is set, "line N,
+// column C" otherwise, or "" when no line is recorded.
 func (p Position) String() string {
 	if p.Line <= 0 {
 		return ""
@@ -26,8 +28,9 @@ func (p Position) String() string {
 	return fmt.Sprintf("line %d, column %d", p.Line, p.Column)
 }
 
-// MissingRequiredError is reported for a field with required (or notEmpty)
-// whose key is absent from every Source and which has no default=.
+// MissingRequiredError is reported for a field marked required (or
+// notEmpty) whose key is absent from every Source and which has no
+// default.
 type MissingRequiredError struct {
 	Field string
 	Key   string
@@ -35,10 +38,7 @@ type MissingRequiredError struct {
 }
 
 func (e *MissingRequiredError) Error() string {
-	if e == nil {
-		return "env: missing required variable"
-	}
-	if e.Field == "" {
+	if e == nil || e.Field == "" {
 		return "env: missing required variable"
 	}
 	return fmt.Sprintf("env: missing required variable %q (field %s)", e.Key, e.Field)
@@ -49,8 +49,8 @@ func (*MissingRequiredError) Is(target error) bool {
 	return ok
 }
 
-// EmptyValueError is reported for a field with notEmpty whose key is set
-// to the empty string.
+// EmptyValueError is reported for a field marked notEmpty whose key
+// is set to the empty string.
 type EmptyValueError struct {
 	Field string
 	Key   string
@@ -58,10 +58,7 @@ type EmptyValueError struct {
 }
 
 func (e *EmptyValueError) Error() string {
-	if e == nil {
-		return "env: empty value for field marked notEmpty"
-	}
-	if e.Field == "" {
+	if e == nil || e.Field == "" {
 		return "env: empty value for field marked notEmpty"
 	}
 	return fmt.Sprintf("env: empty value for %q (field %s, marked notEmpty)", e.Key, e.Field)
@@ -73,15 +70,13 @@ func (*EmptyValueError) Is(target error) bool {
 }
 
 // ParseError is reported when a string value cannot be converted to a
-// field's target Go type (numeric overflow, invalid duration, etc.).
-//
-// Field, Key, and Pos may be empty when the error originates inside the
-// decoder before the loader has wrapped it with field context; the loader
-// fills these in before adding the error to its [MultiError].
+// field's target Go type. Field, Key, and Pos may be empty when the
+// error originates inside the decoder before the loader has wrapped
+// it with field context.
 type ParseError struct {
 	Field string
 	Key   string
-	Value string // raw value (replaced with a redaction marker for secret-tagged fields in Phase 7+)
+	Value string
 	Type  string
 	Cause error
 	Pos   Position
@@ -130,8 +125,7 @@ func (e *ParseError) Unwrap() error {
 }
 
 // SyntaxError is reported when a `.env` file is malformed (unterminated
-// quote, bad escape, etc.). Phase 9's dotenv parser produces these; the
-// type is defined here so the rest of the package can reference it.
+// quote, bad escape, etc.).
 type SyntaxError struct {
 	Pos     Position
 	Message string
@@ -153,8 +147,7 @@ func (*SyntaxError) Is(target error) bool {
 }
 
 // ValidationError wraps an error returned from a target struct's
-// Validate() method. Phase 7 wires the validator hook; the type is
-// defined here for forward compatibility.
+// [Validator.Validate] method.
 type ValidationError struct {
 	Cause error
 }
@@ -178,14 +171,14 @@ func (e *ValidationError) Unwrap() error {
 	return e.Cause
 }
 
-// ImmutableChangedError is reported when a Live[T] reload candidate
-// would have changed a field tagged with immutable. Phase 11 produces
-// these; the type is defined here for forward compatibility.
+// ImmutableChangedError is reported when a [Live] reload candidate
+// would have changed a field tagged immutable. Old and New are
+// redacted for secret-tagged fields.
 type ImmutableChangedError struct {
 	Field string
 	Key   string
-	Old   string // redacted for secret-tagged fields
-	New   string // redacted for secret-tagged fields
+	Old   string
+	New   string
 }
 
 func (e *ImmutableChangedError) Error() string {
@@ -200,8 +193,8 @@ func (*ImmutableChangedError) Is(target error) bool {
 	return ok
 }
 
-// CycleError is reported when variable expansion encounters a reference
-// cycle (A → B → A). Phase 9's dotenv parser produces these.
+// CycleError is reported when variable expansion encounters a
+// reference cycle (A → B → A).
 type CycleError struct {
 	Chain []string
 	Pos   Position
@@ -219,9 +212,9 @@ func (*CycleError) Is(target error) bool {
 	return ok
 }
 
-// MultiError aggregates one or more errors from a single Load call. It
-// implements the Go 1.20+ Unwrap() []error convention so [errors.Is] and
-// [errors.As] walk every branch.
+// MultiError aggregates per-field errors from a single Load call.
+// Implements the Go 1.20+ Unwrap() []error convention so [errors.Is]
+// and [errors.As] walk every branch.
 type MultiError struct {
 	Errors []error
 }
@@ -241,9 +234,8 @@ func (m *MultiError) Error() string {
 	return b.String()
 }
 
-// Unwrap returns the wrapped error list. The Go 1.20+ multi-error form is
-// honored by errors.Is and errors.As, so callers can test whether ANY of
-// the aggregated errors matches a sentinel.
+// Unwrap returns the aggregated errors for [errors.Is] / [errors.As]
+// walking.
 func (m *MultiError) Unwrap() []error {
 	if m == nil {
 		return nil
@@ -256,7 +248,7 @@ func (*MultiError) Is(target error) bool {
 	return ok
 }
 
-// Append appends err to the aggregator, ignoring nil.
+// Append appends err to the aggregator. Nil errors are ignored.
 func (m *MultiError) Append(err error) {
 	if err == nil {
 		return
@@ -264,9 +256,8 @@ func (m *MultiError) Append(err error) {
 	m.Errors = append(m.Errors, err)
 }
 
-// Sentinel errors. The struct-pointer sentinels (those constructed as
-// &XError{}) match by type via the corresponding Is method; the
-// errors.New sentinels match by value identity.
+// Sentinel errors. The struct-pointer sentinels match by type via each
+// error's Is method; the [errors.New] sentinels match by value identity.
 var (
 	// ErrMissingRequired matches any [*MissingRequiredError].
 	ErrMissingRequired = &MissingRequiredError{}
@@ -274,8 +265,7 @@ var (
 	// ErrEmptyValue matches any [*EmptyValueError].
 	ErrEmptyValue = &EmptyValueError{}
 
-	// ErrParse matches any [*ParseError]. Replaces the basic sentinel
-	// from Phase 4 with the full structured form.
+	// ErrParse matches any [*ParseError].
 	ErrParse = &ParseError{}
 
 	// ErrSyntax matches any [*SyntaxError].
@@ -294,49 +284,47 @@ var (
 	ErrMultiError = &MultiError{}
 
 	// ErrNilPointer is returned when [Loader.Load] is called with a nil
-	// pointer, a non-pointer, or a pointer to a non-struct value.
+	// pointer or a non-pointer.
 	ErrNilPointer = errors.New("env: non-nil pointer to struct required")
 
 	// ErrNotStruct is returned when the target type is not a struct.
 	ErrNotStruct = errors.New("env: target must be a struct or pointer to struct")
 
 	// ErrUnknownTagOption is returned when a struct tag contains an
-	// option the loader does not recognize.
+	// unrecognized option.
 	ErrUnknownTagOption = errors.New("env: unknown tag option")
 
 	// ErrConflictingFields is returned when two fields in the same
-	// struct (after prefix accumulation) resolve to the same env-var key.
+	// struct resolve to the same env-var key after prefix accumulation.
 	ErrConflictingFields = errors.New("env: conflicting field names")
 
 	// ErrUnsupportedType is returned when a struct field's target type
 	// cannot be decoded from a string by any built-in or interface
-	// mechanism (chan, func, complex, bare interface{}, struct without
-	// any unmarshaler interface).
+	// mechanism (chan, func, complex, bare any, struct without any
+	// unmarshaler).
 	ErrUnsupportedType = errors.New("env: unsupported target type")
 
-	// ErrUnsetExpansion is returned (under WithStrictExpansion) when
-	// variable expansion encounters an unset variable. Phase 9 wires
-	// this; the sentinel exists here for forward compatibility.
+	// ErrUnsetExpansion is returned under [WithStrictExpansion] (and the
+	// dotenv equivalent) when expansion encounters an unset variable.
 	ErrUnsetExpansion = errors.New("env: variable referenced in expansion is unset")
 
 	// ErrExpansionAssertion is returned when a ${VAR:?msg} assertion
-	// fails during expansion. Phase 9.
+	// fails during expansion.
 	ErrExpansionAssertion = errors.New("env: ${VAR:?...} assertion failed")
 
-	// ErrFromFileRead is returned when a fromFile-tagged field references
-	// a path that cannot be read.
+	// ErrFromFileRead is returned when a fromFile-tagged field
+	// references a path that cannot be read.
 	ErrFromFileRead = errors.New("env: fromFile target is not readable")
 
-	// ErrBlockSizeExceeded is returned when a Snapshot's rendered total
-	// size exceeds a platform block-size limit.
+	// ErrBlockSizeExceeded is returned when a rendered env block exceeds
+	// a platform size limit.
 	ErrBlockSizeExceeded = errors.New("env: rendered env block exceeds platform limit")
 )
 
-// FormatError renders err into a human-readable string. For [*MultiError],
-// every wrapped error is rendered on its own line. Pass color=true to
-// include ANSI bold-red escape sequences around each error message.
-//
-// FormatError returns the empty string when err is nil.
+// FormatError renders err into a human-readable string. For
+// [*MultiError], each wrapped error is rendered on its own line. Pass
+// color=true to wrap each message in ANSI bold-red. Returns "" when
+// err is nil.
 func FormatError(err error, color ...bool) string {
 	if err == nil {
 		return ""

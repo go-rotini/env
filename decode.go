@@ -13,14 +13,10 @@ import (
 	"time"
 )
 
-// decodeOpts carries the per-field tag-driven options that affect value
-// decoding. It is a subset of fieldDescriptor: only the options that
-// actually change how a string is parsed are propagated.
-//
-// For nested decoding (slice elements, map keys/values), Layout passes
-// through (so a []time.Time can use a custom layout); Separator and
-// KVSeparator do NOT propagate (they apply at exactly one container
-// level); Base64/Hex do not propagate (they are []byte-specific).
+// decodeOpts is the per-field tag-driven subset of [fieldDescriptor]
+// that affects value decoding. Layout propagates into nested decoding
+// (slice elements, map values); Separator, KVSeparator, Base64, and
+// Hex apply only at the field level.
 type decodeOpts struct {
 	Separator   string
 	KVSeparator string
@@ -29,8 +25,6 @@ type decodeOpts struct {
 	Hex         bool
 }
 
-// decodeOptsFromDescriptor extracts the decoder-relevant options from a
-// fieldDescriptor.
 func decodeOptsFromDescriptor(d fieldDescriptor) decodeOpts {
 	return decodeOpts{
 		Separator:   d.Separator,
@@ -41,16 +35,12 @@ func decodeOptsFromDescriptor(d fieldDescriptor) decodeOpts {
 	}
 }
 
-// Type cache for built-in special handling. Only types actually special-
-// cased in this file are cached here; types that go through the interface
-// chain (time.Time without layout=, url.URL, net.IP, regexp.Regexp,
-// big.Int, big.Float, big.Rat) don't need a precomputed reflect.Type.
+// Type cache for the special-cased built-ins. Types reached via the
+// interface chain (time.Time without layout=, url.URL, net.IP,
+// regexp.Regexp, big.*) don't need a precomputed reflect.Type.
 //
-// Specifically: regexp.Regexp's pointer receiver implements TextUnmarshaler
-// since Go 1.21, so it is handled by the interface chain even though it is
-// nominally a "built-in special". The behavior is equivalent
-// (regexp.UnmarshalText calls Compile), so we let the interface chain handle
-// it for free.
+// regexp.Regexp's pointer receiver implements TextUnmarshaler since
+// Go 1.21, so the interface chain handles it for free.
 var (
 	timeTimeType     = reflect.TypeFor[time.Time]()
 	timeDurationType = reflect.TypeFor[time.Duration]()
@@ -58,42 +48,29 @@ var (
 	netIPNetType     = reflect.TypeFor[net.IPNet]()
 )
 
-// decodeValue decodes text into dst.
+// decodeValue decodes text into dst, which must be settable and
+// addressable. Priority chain (high to low):
 //
-// dst must be settable and addressable: typically obtained via
-// [reflect.Value.FieldByIndex] on a settable parent struct, or via
-// [reflect.New] for transient values used as map keys/values.
-//
-// The priority chain (high to low):
-//
-//  1. Pointer auto-init: dst of kind Pointer is allocated as needed and
-//     the loop recurses into the pointee. The "set with empty value" case
-//     short-circuits with an allocated zero-T pointer (no recursion into T).
-//  2. Tag-option overrides: types whose decoding behavior changes based on
-//     a tag option (time.Time + layout=, []byte/[N]byte + base64=/hex=).
-//     These run BEFORE the interface chain so user tag intent takes
-//     precedence over interface defaults.
+//  1. Pointer auto-init: nil pointers are allocated; empty text on a
+//     pointer leaves the pointee at its zero value.
+//  2. Tag-option overrides (time.Time + layout=, []byte + base64=/hex=).
 //  3. [Unmarshaler] (UnmarshalEnv).
 //  4. [encoding.TextUnmarshaler] (UnmarshalText).
 //  5. [encoding.BinaryUnmarshaler] (UnmarshalBinary).
-//  6. Built-in types not covered by interfaces (time.Duration, time.Location,
-//     net.IPNet, regexp.Regexp) and []byte/[N]byte default raw-bytes form.
-//  7. Default reflection-based decoding for primitives, slices, arrays, maps.
+//  6. Built-in specials (time.Duration, time.Location, net.IPNet) and
+//     []byte/[N]byte default raw form.
+//  7. Default reflection (primitives, slices, arrays, maps).
 func decodeValue(dst reflect.Value, text string, opts decodeOpts) error {
-	// 1. Pointer auto-init.
 	for dst.Kind() == reflect.Pointer {
 		if dst.IsNil() {
 			dst.Set(reflect.New(dst.Type().Elem()))
 		}
 		if text == "" {
-			// Set-but-empty: leave the pointee at its zero value rather
-			// than recursing (which would fail for many leaf types).
 			return nil
 		}
 		dst = dst.Elem()
 	}
 
-	// 2. Tag-option overrides.
 	if dst.Type() == timeTimeType && opts.Layout != "" {
 		return decodeTimeWithLayout(dst, text, opts.Layout)
 	}
@@ -101,7 +78,6 @@ func decodeValue(dst reflect.Value, text string, opts decodeOpts) error {
 		return decodeBytes(dst, text, opts)
 	}
 
-	// 3-5. Interface chain.
 	addr := dst.Addr()
 	if u, ok := addr.Interface().(Unmarshaler); ok {
 		if err := u.UnmarshalEnv(text); err != nil {
@@ -122,19 +98,16 @@ func decodeValue(dst reflect.Value, text string, opts decodeOpts) error {
 		return nil
 	}
 
-	// 6. Built-in types not covered by interfaces.
 	if handled, err := decodeBuiltinSpecial(dst, text, opts); handled {
 		return err
 	}
 
-	// 7. Default reflection-based decoding.
 	return decodeReflect(dst, text, opts)
 }
 
-// decodeBuiltinSpecial handles the set of well-known types that the
-// interface chain wouldn't otherwise reach (time.Duration is a sized int
-// alias with no UnmarshalText; net.IPNet and regexp.Regexp have no
-// unmarshal interfaces) and the byte-container default (raw text → bytes).
+// decodeBuiltinSpecial handles types the interface chain doesn't reach
+// (time.Duration is an int64 alias; net.IPNet has no unmarshaler) plus
+// the byte-container default (raw text → bytes).
 func decodeBuiltinSpecial(dst reflect.Value, text string, opts decodeOpts) (bool, error) {
 	switch dst.Type() {
 	case timeDurationType:
@@ -165,10 +138,9 @@ func decodeBuiltinSpecial(dst reflect.Value, text string, opts decodeOpts) (bool
 	return false, nil
 }
 
-// decodeReflect handles primitive, slice, array, and map kinds via
-// reflection. Types unsupported by both the interface chain and the
-// built-in registry land here and produce [ErrUnsupportedType] when no
-// kind branch matches (chan, func, complex, interface{}, struct).
+// decodeReflect handles primitive, slice, array, and map kinds.
+// Returns [ErrUnsupportedType] for chan, func, complex, interface, and
+// struct (which should have been handled by the interface chain).
 func decodeReflect(dst reflect.Value, text string, opts decodeOpts) error {
 	switch dst.Kind() {
 	case reflect.String:
@@ -212,8 +184,6 @@ func decodeReflect(dst reflect.Value, text string, opts decodeOpts) error {
 	return fmt.Errorf("%w: %s", ErrUnsupportedType, dst.Type())
 }
 
-// decodeTimeWithLayout parses text as a time.Time using the user-supplied
-// layout. Called when the layout= tag option is set on a time.Time field.
 func decodeTimeWithLayout(dst reflect.Value, text, layout string) error {
 	tt, err := time.Parse(layout, text)
 	if err != nil {
@@ -223,8 +193,9 @@ func decodeTimeWithLayout(dst reflect.Value, text, layout string) error {
 	return nil
 }
 
-// isByteContainer reports whether t is []byte or [N]byte. Strings are not
-// byte containers in this sense (they have their own decoder branch).
+// isByteContainer reports whether t is []byte or [N]byte. Strings are
+// handled by their own decoder branch, so they are not considered byte
+// containers here.
 func isByteContainer(t reflect.Type) bool {
 	switch t.Kind() {
 	case reflect.Slice, reflect.Array:
@@ -233,9 +204,9 @@ func isByteContainer(t reflect.Type) bool {
 	return false
 }
 
-// decodeBytes handles []byte and [N]byte fields. With no base64/hex tag,
-// raw text bytes are used. With base64= or hex=, the corresponding decoder
-// runs; for fixed-size [N]byte, the decoded length must match N.
+// decodeBytes handles []byte and [N]byte fields. Without base64/hex
+// the raw text bytes are used; with base64= or hex= the corresponding
+// decoder runs. For [N]byte the decoded length must match N.
 func decodeBytes(dst reflect.Value, text string, opts decodeOpts) error {
 	var data []byte
 	var err error
@@ -255,7 +226,6 @@ func decodeBytes(dst reflect.Value, text string, opts decodeOpts) error {
 		dst.SetBytes(data)
 		return nil
 	}
-	// reflect.Array: enforce length.
 	if len(data) != dst.Len() {
 		return &ParseError{
 			Value: text,
@@ -267,9 +237,6 @@ func decodeBytes(dst reflect.Value, text string, opts decodeOpts) error {
 	return nil
 }
 
-// decodeSlice splits text by the configured separator and decodes each
-// element. The empty input produces an empty (non-nil) slice. The Layout
-// option propagates to elements; Separator/KVSeparator do not.
 func decodeSlice(dst reflect.Value, text string, opts decodeOpts) error {
 	sep := separatorOr(opts.Separator, ",")
 	var parts []string
@@ -287,9 +254,6 @@ func decodeSlice(dst reflect.Value, text string, opts decodeOpts) error {
 	return nil
 }
 
-// decodeArrayNonByte decodes a [N]T array where T is not byte. The number
-// of split parts must equal N; mismatches return ErrParse. (Byte arrays
-// are routed through decodeBytes earlier.)
 func decodeArrayNonByte(dst reflect.Value, text string, opts decodeOpts) error {
 	sep := separatorOr(opts.Separator, ",")
 	var parts []string
@@ -312,10 +276,6 @@ func decodeArrayNonByte(dst reflect.Value, text string, opts decodeOpts) error {
 	return nil
 }
 
-// decodeMap parses a separator-joined sequence of key/value pairs. Empty
-// text produces an empty (non-nil) map. The element decoder is applied
-// recursively to keys and values; map keys must therefore be a type the
-// decoder accepts.
 func decodeMap(dst reflect.Value, text string, opts decodeOpts) error {
 	sep := separatorOr(opts.Separator, ",")
 	kvSep := separatorOr(opts.KVSeparator, ":")
@@ -351,9 +311,8 @@ func decodeMap(dst reflect.Value, text string, opts decodeOpts) error {
 	return nil
 }
 
-// Decoder-internal sentinel errors used as wrapped causes. The decoder's
-// public surface always reports a [*ParseError]; these sentinels appear
-// inside the Cause chain and are reachable via [errors.Is].
+// Internal decoder sentinels surfaced as [*ParseError] causes; reach
+// them via [errors.Is].
 var (
 	errInvalidBool         = errors.New("invalid boolean")
 	errBytesLengthMismatch = errors.New("byte length mismatch")
@@ -361,8 +320,7 @@ var (
 	errMissingKVSeparator  = errors.New("missing kv separator")
 )
 
-// parseBool implements a tolerant bool parser: case-insensitive
-// true/false plus 1/0, yes/no, on/off.
+// parseBool accepts case-insensitive true/false, 1/0, yes/no, on/off.
 func parseBool(s string) (bool, error) {
 	switch strings.ToLower(s) {
 	case "true", "1", "yes", "on":
@@ -373,9 +331,8 @@ func parseBool(s string) (bool, error) {
 	return false, fmt.Errorf("%w: %q", errInvalidBool, s)
 }
 
-// wrapDecodeErr wraps a low-level decode failure as a [*ParseError]. The
-// Field, Key, and Pos fields are left empty; the loader fills them in
-// after the decoder returns.
+// wrapDecodeErr wraps a low-level decode failure as a [*ParseError].
+// Field, Key, and Pos are left empty; the loader fills them in.
 func wrapDecodeErr(typ reflect.Type, text string, cause error) error {
 	return &ParseError{
 		Value: text,
@@ -384,7 +341,6 @@ func wrapDecodeErr(typ reflect.Type, text string, cause error) error {
 	}
 }
 
-// separatorOr returns sep when non-empty, else fallback.
 func separatorOr(sep, fallback string) string {
 	if sep == "" {
 		return fallback

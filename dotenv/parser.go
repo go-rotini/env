@@ -1,9 +1,6 @@
 package dotenv
 
-// parse is the entry point for converting source bytes into a [*File].
-//
-// The scanner produces logical entries directly, so this layer is thin:
-// it just delegates and applies the optional post-parse expansion pass.
+// parse runs the scanner and the optional expansion pass.
 func parse(src []byte, opts parseOptions) (*File, error) {
 	f, err := scanFile(src, opts)
 	if err != nil {

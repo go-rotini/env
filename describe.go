@@ -43,32 +43,28 @@ type FieldDoc struct {
 	Separator string
 }
 
-// Describe walks v's exported fields and returns a [FieldDoc] for each
-// loadable leaf. Returns nil when v is not a struct (or pointer to one)
-// or when the struct's tags fail to validate; use [Loader.PrintUsage]
-// or [Loader.Markdown] for error-returning variants.
-//
-// opts apply to a fresh [Loader] (so callers can specify [WithPrefix]
-// or [WithTagName] without constructing a Loader themselves).
+// Describe returns a [FieldDoc] for each loadable leaf of v. Returns
+// nil when v is not a struct (or pointer to one) or when the struct's
+// tags fail to validate; use [PrintUsage] / [Markdown] for the
+// error-returning variants. opts are applied to a fresh [Loader].
 func Describe(v any, opts ...Option) []FieldDoc {
 	return New(opts...).Describe(v)
 }
 
-// PrintUsage writes a human-readable column-aligned table of v's
-// loadable fields to w. Suitable for `myapp --env-help`-style output.
+// PrintUsage writes a column-aligned table of v's loadable fields to
+// w. Suitable for `myapp --env-help`-style output.
 func PrintUsage(w io.Writer, v any, opts ...Option) error {
 	return New(opts...).PrintUsage(w, v)
 }
 
 // Markdown writes a GitHub-Flavored Markdown table of v's loadable
-// fields to w. Suitable for embedding in `docs/CONFIG.md` or `README.md`
-// via `myapp --env-doc`.
+// fields to w. Suitable for embedding in `docs/CONFIG.md`.
 func Markdown(w io.Writer, v any, opts ...Option) error {
 	return New(opts...).Markdown(w, v)
 }
 
-// Describe is the [Loader]-method form of the package-level [Describe].
-// The loader's [WithPrefix] is applied to each [FieldDoc.Name].
+// Describe is the [Loader]-method form of [Describe]. [FieldDoc.Name]
+// includes the loader's [WithPrefix].
 func (l *Loader) Describe(v any) []FieldDoc {
 	rv, ok := describeRV(v)
 	if !ok {
@@ -82,8 +78,8 @@ func (l *Loader) Describe(v any) []FieldDoc {
 }
 
 // PrintUsage is the [Loader]-method form of [PrintUsage]. Returns an
-// error when v is not a struct, when struct tags fail to validate, or
-// when writing to w fails.
+// error when v is not a struct, struct tags fail to validate, or
+// writing fails.
 func (l *Loader) PrintUsage(w io.Writer, v any) error {
 	docs, err := l.docsOrError(v)
 	if err != nil {
@@ -101,7 +97,6 @@ func (l *Loader) Markdown(w io.Writer, v any) error {
 	return printMarkdownTable(w, docs)
 }
 
-// describeRV unwraps v to its struct value or reports failure.
 func describeRV(v any) (reflect.Value, bool) {
 	if v == nil {
 		return reflect.Value{}, false
@@ -119,9 +114,7 @@ func describeRV(v any) (reflect.Value, bool) {
 	return rv, true
 }
 
-// docsOrError is the shared front-end for PrintUsage and Markdown:
-// it returns the FieldDoc slice or a typed error explaining why none
-// could be produced.
+// docsOrError is the shared front-end for PrintUsage and Markdown.
 func (l *Loader) docsOrError(v any) ([]FieldDoc, error) {
 	if v == nil {
 		return nil, ErrNilPointer
@@ -143,9 +136,6 @@ func (l *Loader) docsOrError(v any) ([]FieldDoc, error) {
 	return l.buildFieldDocs(rv.Type(), info), nil
 }
 
-// buildFieldDocs converts the loader's structInfo into the public
-// FieldDoc slice. Names include the loader's prefix; GoType uses
-// reflect.Type.String() ("int", "[]string", "time.Duration", etc.).
 func (l *Loader) buildFieldDocs(t reflect.Type, info *structInfo) []FieldDoc {
 	docs := make([]FieldDoc, 0, len(info.Fields))
 	for _, fd := range info.Fields {
@@ -165,20 +155,10 @@ func (l *Loader) buildFieldDocs(t reflect.Type, info *structInfo) []FieldDoc {
 	return docs
 }
 
-// maxDefaultDisplayWidth caps the rendered width of the DEFAULT column
-// in the text table. Defaults longer than this are truncated with an
-// ellipsis to keep the table readable.
+// maxDefaultDisplayWidth caps the DEFAULT column; longer defaults are
+// ellipsis-truncated.
 const maxDefaultDisplayWidth = 40
 
-// printUsageTable renders docs as a column-aligned text table.
-//
-// Columns: NAME, TYPE, DEFAULT, REQUIRED, DESCRIPTION. Column widths
-// are dynamic (max of header and longest field, capped at
-// [maxDefaultDisplayWidth] for DEFAULT). The DESCRIPTION column is
-// last, so no padding is applied to it.
-//
-// Annotations on the description: "(secret)" prefix for secret-tagged
-// fields, "(notEmpty)" / "(immutable)" prefixes for those tag options.
 func printUsageTable(w io.Writer, docs []FieldDoc) error {
 	if len(docs) == 0 {
 		return nil
@@ -241,10 +221,8 @@ func printUsageTable(w io.Writer, docs []FieldDoc) error {
 }
 
 // printMarkdownTable renders docs as a GitHub-Flavored Markdown table.
-//
-// Columns mirror PrintUsage. Cell values are wrapped in backticks where
-// helpful (Name, GoType, Default) so the rendered output uses `code`
-// formatting; pipe characters in cells are escaped as `\|`.
+// Name / GoType / Default are wrapped in backticks; pipe characters
+// are escaped as `\|`.
 func printMarkdownTable(w io.Writer, docs []FieldDoc) error {
 	if len(docs) == 0 {
 		return nil
@@ -279,9 +257,8 @@ func printMarkdownTable(w io.Writer, docs []FieldDoc) error {
 	return nil
 }
 
-// composeDescription joins flag annotations with the user-supplied
-// envDesc text. Annotations always precede the text and are space-
-// separated. Order: secret, notEmpty, immutable, then desc.
+// composeDescription prepends flag annotations (in order: secret,
+// notEmpty, immutable) to the envDesc text.
 func composeDescription(d FieldDoc) string {
 	var prefixes []string
 	if d.Secret {
@@ -303,10 +280,7 @@ func composeDescription(d FieldDoc) string {
 	return prefix + " " + d.Description
 }
 
-// truncate clamps s to maxLen runes, replacing the tail with an
-// ellipsis when truncation occurs. Operates on bytes for simplicity;
-// non-ASCII identifiers in env-var names are exotic enough not to
-// warrant rune-aware truncation here.
+// truncate clamps s to maxLen bytes with an ellipsis tail.
 func truncate(s string, maxLen int) string {
 	if maxLen <= 0 || len(s) <= maxLen {
 		return s
@@ -317,10 +291,8 @@ func truncate(s string, maxLen int) string {
 	return s[:maxLen-3] + "..."
 }
 
-// escapeMD escapes the pipe character in markdown cell content. Other
-// special characters are left as-is — most of them (asterisk, backtick,
-// underscore) render harmlessly inside a code-span, which is how Name,
-// GoType, and Default are formatted.
+// escapeMD escapes pipe characters in markdown table cells; other
+// markdown specials render harmlessly inside code spans.
 func escapeMD(s string) string {
 	if !strings.ContainsRune(s, '|') {
 		return s

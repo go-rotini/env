@@ -7,11 +7,10 @@ import (
 	"github.com/go-rotini/env/dotenv"
 )
 
-// DefaultDebounce is the default quiet period the watcher waits for after
-// the last fsnotify event before re-parsing the target file. 75ms covers
-// the burst patterns produced by every common editor save sequence
-// (write-temp-then-rename, delete-then-recreate, multi-fsync) without
-// being long enough to feel laggy in interactive use.
+// DefaultDebounce is the default quiet period after the last fsnotify
+// event before re-parsing. 75ms covers the burst patterns produced by
+// editor save sequences (write-temp-then-rename, delete-then-recreate,
+// multi-fsync) without feeling laggy.
 const DefaultDebounce = 75 * time.Millisecond
 
 // Option configures a [Source] returned by [New].
@@ -30,19 +29,16 @@ func defaultOptions() options {
 	}
 }
 
-// WithParseOptions forwards the supplied [dotenv.ParseOption] values to
-// every parse the watcher performs (initial load and each post-change
-// re-parse). Use it when the target file relies on `.env`-parser features
-// like [dotenv.WithExpand] or [dotenv.WithBackticks].
+// WithParseOptions forwards opts to every parse the watcher performs
+// (initial load and each reload).
 func WithParseOptions(opts ...dotenv.ParseOption) Option {
 	return func(o *options) {
 		o.parseOptions = append(o.parseOptions, opts...)
 	}
 }
 
-// WithDebounce overrides the quiet-period delay between the last
-// fsnotify event and the re-parse. Negative values are clamped to zero
-// (re-parse on every event); zero disables debouncing entirely.
+// WithDebounce overrides the quiet period before reload. Negative
+// values are clamped to 0 (reload on every event).
 func WithDebounce(d time.Duration) Option {
 	return func(o *options) {
 		if d < 0 {
@@ -52,10 +48,8 @@ func WithDebounce(d time.Duration) Option {
 	}
 }
 
-// WithLogger directs the watcher's non-fatal diagnostics — re-parse
-// failures, fsnotify error-channel messages, dropped events on a slow
-// subscriber — to l. The default is a discard logger; nothing is logged
-// when WithLogger is not set.
+// WithLogger directs non-fatal diagnostics (reload failures, fsnotify
+// errors, dropped events) to l. Default is a discard logger.
 func WithLogger(l *slog.Logger) Option {
 	return func(o *options) {
 		if l != nil {

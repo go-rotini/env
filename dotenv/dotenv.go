@@ -19,8 +19,8 @@ func Parse(data []byte, opts ...ParseOption) (*File, error) {
 	return parse(data, o)
 }
 
-// Load reads a `.env` file from path and returns its parsed key/value
-// map (last-write-wins per Bash convention).
+// Load reads a `.env` file from path and returns its key/value map
+// (last-write-wins per Bash convention).
 func Load(path string, opts ...ParseOption) (map[string]string, error) {
 	o := defaultParseOptions()
 	for _, opt := range opts {
@@ -40,11 +40,9 @@ func Load(path string, opts ...ParseOption) (map[string]string, error) {
 }
 
 // NewSource reads a `.env` file from path and returns an [env.Source]
-// that consults its parsed key/value map. Subsequent file changes do
-// NOT propagate; the source is a snapshot taken at construction.
-//
-// For reload-aware sources, use the env/dotenv/watcher sub-package
-// (added in Phase 10).
+// over its parsed map. The source is a snapshot taken at construction;
+// subsequent file changes do not propagate. For live reload, use the
+// env/dotenv/watcher sub-package.
 func NewSource(path string, opts ...ParseOption) (env.Source, error) {
 	o := defaultParseOptions()
 	for _, opt := range opts {
@@ -64,7 +62,7 @@ func NewSource(path string, opts ...ParseOption) (env.Source, error) {
 }
 
 // NewReaderSource reads a `.env` byte stream from r and returns an
-// [env.Source] that consults its parsed key/value map.
+// [env.Source] over its parsed map.
 func NewReaderSource(r io.Reader, opts ...ParseOption) (env.Source, error) {
 	o := defaultParseOptions()
 	for _, opt := range opts {
@@ -81,8 +79,6 @@ func NewReaderSource(r io.Reader, opts ...ParseOption) (env.Source, error) {
 	return &fileSource{m: f.ToMap()}, nil
 }
 
-// fileSource wraps a parsed `.env` map as an [env.Source]. The map is
-// captured at construction; the Source is read-only and concurrent-safe.
 type fileSource struct {
 	m map[string]string
 }
@@ -92,8 +88,4 @@ func (s *fileSource) Lookup(key string) (string, bool) {
 	return v, ok
 }
 
-// Compile-time check: fileSource satisfies env.Source.
 var _ env.Source = (*fileSource)(nil)
-
-// (Watcher is intentionally NOT implemented here; it lives in the
-// env/dotenv/watcher sub-package which adds the fsnotify dependency.)

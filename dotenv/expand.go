@@ -7,29 +7,19 @@ import (
 	"github.com/go-rotini/env"
 )
 
-// dollarSuppressSentinel is the byte the scanner emits in front of a
-// literal `$` that came from a `\$` escape in a double-quoted value.
-// The expander treats sentinel-marked `$` as a literal (no expansion)
-// and strips the sentinel from the final value.
+// dollarSuppressSentinel marks a literal `$` produced by a `\$`
+// escape in a double-quoted value. The expander emits a literal `$`
+// for sentinel-marked positions and never recurses into them.
 //
-// The byte is U+0007 (BELL); env values practically never contain it,
-// and any user-supplied BELL byte in a literal value passes through
-// unaffected (it doesn't precede a `$`).
+// U+0007 (BELL) is used because env values practically never contain
+// it; user-supplied BELL bytes pass through unaffected (they don't
+// precede a `$`).
 const dollarSuppressSentinel = 0x07
 
-// expandAll runs variable expansion over every assignment entry's
-// decoded value, in source order. Lookups consult the file's own
-// already-resolved entries first, then any parent supplied via
-// [WithExpansionParent].
-//
-// Single-quoted and backtick-quoted entries are skipped entirely (per
-// dialect convention, those forms suppress expansion). Double-quoted
-// values still need their sentinel-marked dollars resolved even when
-// expansion is disabled, so the scanner's `\$` → sentinel marking is
-// always undone here.
-//
-// On the first error encountered, expansion halts and the
-// [*ExpansionError] is returned.
+// expandAll runs variable expansion over every assignment entry in
+// source order. Single-quoted and backtick-quoted values are skipped
+// (their dialects suppress expansion). Lookups consult the file's
+// already-resolved entries first, then any [WithExpansionParent].
 func (f *File) expandAll(opts parseOptions) error {
 	resolved := make(map[string]string)
 	for i := range f.entries {
@@ -37,8 +27,6 @@ func (f *File) expandAll(opts parseOptions) error {
 		if e.Kind != EntryAssignment {
 			continue
 		}
-		// Single-quoted and backtick: literal values, no expansion.
-		// Their decoded Value already contains the source bytes verbatim.
 		if e.quote == '\'' || e.quote == '`' {
 			continue
 		}
@@ -52,19 +40,10 @@ func (f *File) expandAll(opts parseOptions) error {
 	return nil
 }
 
-// expand evaluates `$VAR`, `${VAR}`, `${VAR:-default}`, `${VAR-default}`,
-// and `${VAR:?error}` references in s. Backslash-dollar (`\$`) suppresses
-// expansion of the following identifier.
-//
-// resolved maps names already resolved in the current file (consulted
-// first); the parent Source from opts is consulted second.
 func expand(s string, pos env.Position, opts parseOptions, resolved map[string]string) (string, error) {
 	return expandWithDepth(s, pos, opts, resolved, 0)
 }
 
-// expandWithDepth is the recursive workhorse. depth is the current
-// recursion level; the caller's [WithMaxExpansionDepth] cap protects
-// against runaway nested default expansion.
 func expandWithDepth(s string, pos env.Position, opts parseOptions, resolved map[string]string, depth int) (string, error) {
 	if depth > opts.maxExpansionDepth {
 		return "", &ExpansionError{
@@ -78,22 +57,17 @@ func expandWithDepth(s string, pos env.Position, opts parseOptions, resolved map
 		c := s[i]
 		switch c {
 		case dollarSuppressSentinel:
-			// Scanner-inserted marker for `\$` in double-quoted values.
-			// Emit a literal `$` and skip the sentinel + the dollar.
 			if i+1 < len(s) && s[i+1] == '$' {
 				b.WriteByte('$')
 				i += 2
 				continue
 			}
-			// Defensive: stray sentinel without a following `$` is
-			// dropped silently (should never happen in practice).
+			// Defensive: a stray sentinel shouldn't occur in practice.
 			i++
 		case '\\':
-			// `\$` in unquoted values isn't a recognized dialect escape
-			// (unquoted values normally have no escape interpretation),
-			// but accept it here as a courtesy: if WithExpand is on, we
-			// treat `\$` as suppressing expansion of the following
-			// identifier.
+			// `\$` in unquoted values is accepted as a courtesy: when
+			// expansion is on, treat it as suppressing the following
+			// reference.
 			if i+1 < len(s) && s[i+1] == '$' {
 				b.WriteByte('$')
 				i += 2
@@ -104,7 +78,6 @@ func expandWithDepth(s string, pos env.Position, opts parseOptions, resolved map
 		case '$':
 			ref, ok := parseVarRef(s[i:])
 			if !ok {
-				// Lone `$` or `$<non-ident>`: emit verbatim.
 				b.WriteByte('$')
 				i++
 				continue
@@ -166,7 +139,6 @@ func expandWithDepth(s string, pos env.Position, opts parseOptions, resolved map
 	return b.String(), nil
 }
 
-// varRef captures the parsed shape of one `$VAR` / `${...}` reference.
 type varRef struct {
 	name           string
 	defaultVal     string
@@ -177,24 +149,20 @@ type varRef struct {
 	consumed       int
 }
 
-// parseVarRef parses one `$VAR` / `${...}` reference at the start of s.
-// Returns the parsed [varRef] and ok=true on success; ok=false when s
-// does not begin with a recognizable reference (lone `$`, `$<non-ident>`,
-// unterminated `${`).
-//
-// Recognized shapes:
+// parseVarRef parses one reference at the start of s. ok=false when s
+// does not begin with a recognizable reference (lone `$`,
+// `$<non-ident>`, unterminated `${`). Recognized shapes:
 //
 //	$NAME
 //	${NAME}
-//	${NAME:-DEFAULT}     hasDefault=true, defaultIfEmpty=true
-//	${NAME-DEFAULT}      hasDefault=true, defaultIfEmpty=false
-//	${NAME:?MSG}         hasAssert=true
+//	${NAME:-DEFAULT}     hasDefault, defaultIfEmpty
+//	${NAME-DEFAULT}      hasDefault
+//	${NAME:?MSG}         hasAssert
 func parseVarRef(s string) (varRef, bool) {
 	if len(s) < 2 || s[0] != '$' {
 		return varRef{}, false
 	}
 	if s[1] != '{' {
-		// $NAME form.
 		end := 1
 		for end < len(s) && isVarRefByte(s[end]) {
 			end++
@@ -204,7 +172,6 @@ func parseVarRef(s string) (varRef, bool) {
 		}
 		return varRef{name: s[1:end], consumed: end}, true
 	}
-	// ${...} form. Find the matching `}`, balancing nested `${...}`.
 	closeIdx := findMatchingBrace(s[2:])
 	if closeIdx < 0 {
 		return varRef{}, false
@@ -212,8 +179,6 @@ func parseVarRef(s string) (varRef, bool) {
 	body := s[2 : 2+closeIdx]
 	consumed := 2 + closeIdx + 1
 
-	// Find the operator: ":-", "-", or ":?" — first occurrence at the
-	// TOP LEVEL of body (i.e., not inside a nested ${...}).
 	opIdx, opLen, op := firstTopLevelOperator(body)
 	if opIdx < 0 {
 		return varRef{name: body, consumed: consumed}, true
@@ -229,15 +194,13 @@ func parseVarRef(s string) (varRef, bool) {
 	return varRef{name: body, consumed: consumed}, true
 }
 
-// findMatchingBrace returns the index in s of the `}` that matches the
-// `{` that was just opened (i.e., the outer scope's). Nested `${...}`
-// are balanced. Returns -1 when no matching brace is found.
+// findMatchingBrace returns the index in s of the `}` matching the
+// outer-scope `{`, balancing nested `${...}`. Returns -1 when none.
 func findMatchingBrace(s string) int {
 	depth := 0
 	for i := 0; i < len(s); i++ {
 		switch s[i] {
 		case '\\':
-			// Skip the escaped character.
 			if i+1 < len(s) {
 				i++
 			}
@@ -253,9 +216,9 @@ func findMatchingBrace(s string) int {
 	return -1
 }
 
-// firstTopLevelOperator finds the first ":-", ":?", or "-" operator in
-// body that appears at the top level (not inside a nested ${...}).
-// Returns (index, length, op) or (-1, 0, "") if none found.
+// firstTopLevelOperator finds the first ":-", ":?", or "-" at the top
+// level of body (not inside a nested `${...}`). Returns
+// (-1, 0, "") when none.
 func firstTopLevelOperator(body string) (int, int, string) {
 	depth := 0
 	for i := 0; i < len(body); i++ {
@@ -289,9 +252,9 @@ func firstTopLevelOperator(body string) (int, int, string) {
 	return -1, 0, ""
 }
 
-// isVarRefByte reports whether c can appear inside a `$NAME` (no-brace)
-// reference. POSIX identifier chars only — no relaxed-name extensions
-// (the relaxed forms are too ambiguous to recognize without braces).
+// isVarRefByte reports whether c can appear inside a `$NAME` (no
+// braces) reference. POSIX identifier chars only — relaxed forms are
+// too ambiguous to recognize without braces.
 func isVarRefByte(c byte) bool {
 	switch {
 	case c >= 'A' && c <= 'Z':
@@ -307,13 +270,9 @@ func isVarRefByte(c byte) bool {
 }
 
 // lookupVar resolves name against the file's already-parsed entries
-// first, then any parent Source from opts. Returns the value and whether
-// the name was found in either source.
-//
-// Runaway recursion via deeply-nested defaults is bounded by
-// [WithMaxExpansionDepth]; cycles in the literal source text (e.g.,
-// `${A:-${A:-${A}}}`) hit the depth limit and surface as a
-// max-depth ExpansionError.
+// first, then any [WithExpansionParent] source. Cycles like
+// `${A:-${A:-${A}}}` are bounded by [WithMaxExpansionDepth] and
+// surface as an ExpansionError when the cap is reached.
 func lookupVar(name string, opts parseOptions, resolved map[string]string) (string, bool) {
 	if v, ok := resolved[name]; ok {
 		return v, true

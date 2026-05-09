@@ -10,63 +10,55 @@ import (
 type EntryKind int
 
 const (
-	// EntryBlank is a line containing only whitespace (or the empty line
-	// at end of file).
+	// EntryBlank is a whitespace-only line.
 	EntryBlank EntryKind = iota
 
-	// EntryComment is a line whose first non-whitespace character is `#`.
-	// Trailing comments on assignment lines are stored on the assignment
-	// entry, not as separate EntryComment entries.
+	// EntryComment is a line whose first non-whitespace character is
+	// `#`. Trailing comments on assignment lines are stored on the
+	// assignment, not as separate EntryComment entries.
 	EntryComment
 
 	// EntryAssignment is a `KEY=VALUE` (or `KEY: VALUE`) line.
 	EntryAssignment
 )
 
-// Entry is one logical line in a parsed [`.env`] file. Most callers
-// interact with entries indirectly through [File.Get] / [File.Set] /
-// [File.Delete] / [File.Keys]; the entry list is exposed only via
-// [File.Marshal] (which uses each entry's preserved source bytes for
-// byte-exact round-trip) and via direct AST traversal for advanced
-// tooling.
+// Entry is one logical line in a parsed `.env` file. Most callers use
+// [File.Get] / [File.Set] / [File.Delete] / [File.Keys] instead of
+// reading the entry list directly.
 type Entry struct {
 	Kind EntryKind
 
-	// Key is the assignment key (without the `export ` prefix). Empty
+	// Key is the assignment key (without the `export ` prefix), empty
 	// for non-assignment entries.
 	Key string
 
-	// Value is the decoded value: escape sequences interpreted, quoting
-	// stripped, and (when [WithExpand] was set during parse) variable
-	// references resolved. Empty for non-assignment entries.
+	// Value is the decoded value: escapes interpreted, quoting
+	// stripped, and (with [WithExpand]) variable references resolved.
+	// Empty for non-assignment entries.
 	Value string
 
 	// Pos is the source position of the entry's first byte.
 	Pos env.Position
 
-	// quote is the value's source quoting form: 0 (unquoted), '"', '\'',
-	// or '`'. Used by the expansion pass to skip single-quoted and
-	// backtick-quoted values. Unexported because it's an implementation
-	// detail of the parse → expand pipeline.
+	// quote is the value's source quoting form (0, '"', '\'', or '`')
+	// — internal to the parse → expand pipeline.
 	quote byte
 
-	// raw is the verbatim source text of this entry, including the line
-	// ending. Marshal emits this slice unchanged. Set methods update
-	// this from the new key/value to keep the AST consistent on round-
-	// trip; comments and blank lines retain their original raw bytes.
+	// raw is the verbatim source text including the line ending.
+	// Marshal emits this slice unchanged for unmutated entries.
 	raw []byte
 }
 
-// File is the AST for a parsed `.env` source. It preserves entry order
-// and per-entry source bytes so [File.Marshal] is byte-exact on
-// canonical (unmutated) inputs.
+// File is the AST for a parsed `.env` source. Entry order and per-
+// entry source bytes are preserved so [File.Marshal] is byte-exact on
+// unmutated inputs.
 type File struct {
 	entries []Entry
-	path    string // set when the file was loaded from disk; "" for in-memory parses
+	path    string
 }
 
-// Path returns the file path the AST was loaded from, or empty when the
-// AST originated from a [Parse] call against in-memory bytes.
+// Path returns the file path the AST was loaded from, or "" for an
+// in-memory [Parse].
 func (f *File) Path() string {
 	if f == nil {
 		return ""
@@ -74,8 +66,8 @@ func (f *File) Path() string {
 	return f.path
 }
 
-// Entries returns the entry list. Callers should not mutate the returned
-// slice; use [File.Set] / [File.Delete] instead.
+// Entries returns the entry list. The slice is not for caller
+// mutation; use [File.Set] / [File.Delete].
 func (f *File) Entries() []Entry {
 	if f == nil {
 		return nil
@@ -83,10 +75,9 @@ func (f *File) Entries() []Entry {
 	return f.entries
 }
 
-// Get returns the value associated with key and whether the key is
-// present. When the same key appears in multiple assignment entries,
-// the LAST occurrence wins (matches the behavior of `source <file>`
-// in Bash).
+// Get returns the value associated with key. When the key appears in
+// multiple assignments the LAST occurrence wins (matching `source
+// <file>` in Bash).
 func (f *File) Get(key string) (value string, ok bool) {
 	if f == nil {
 		return "", false
@@ -99,15 +90,10 @@ func (f *File) Get(key string) (value string, ok bool) {
 	return "", false
 }
 
-// Set assigns value to key. If an assignment for key already exists,
-// its value is updated in place (preserving its position and any
-// surrounding comments/blank lines); otherwise a new assignment entry
-// is appended at the end of the file.
-//
-// The new value is rendered using sensible-default quoting rules
-// ([needsQuoting] / [quoteValue] from the encoder family). A round-trip
-// of unmutated keys remains byte-exact; a round-trip of a mutated key
-// is byte-exact except for the mutated line itself.
+// Set assigns value to key. An existing assignment is updated in
+// place; otherwise a new assignment is appended. The new value is
+// rendered with sensible-default quoting; round-trip is byte-exact
+// except for the mutated line.
 func (f *File) Set(key, value string) {
 	if f == nil {
 		return
@@ -127,8 +113,8 @@ func (f *File) Set(key, value string) {
 	})
 }
 
-// Delete removes every assignment entry whose key matches. Returns true
-// if any entry was removed. Comments and blank lines are unaffected.
+// Delete removes every assignment for key. Returns true when at least
+// one entry was removed. Comments and blank lines are unaffected.
 func (f *File) Delete(key string) bool {
 	if f == nil {
 		return false
@@ -144,10 +130,8 @@ func (f *File) Delete(key string) bool {
 	return removed
 }
 
-// Keys returns the list of assignment keys in insertion order. When the
-// same key appears in multiple assignment entries, only the FIRST
-// occurrence is included (so the slice has no duplicates while
-// preserving the order in which keys first appeared).
+// Keys returns assignment keys in insertion order, deduplicated to the
+// first occurrence.
 func (f *File) Keys() []string {
 	if f == nil {
 		return nil
@@ -167,8 +151,8 @@ func (f *File) Keys() []string {
 	return out
 }
 
-// ToMap returns the file's effective key/value mapping (last-write-wins
-// per Bash convention).
+// ToMap returns the file's effective key/value mapping (last-write-
+// wins per Bash convention).
 func (f *File) ToMap() map[string]string {
 	if f == nil {
 		return nil

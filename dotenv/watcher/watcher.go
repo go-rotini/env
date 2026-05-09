@@ -15,31 +15,24 @@ import (
 	"github.com/go-rotini/env/dotenv"
 )
 
-// Sentinel errors returned by the watcher.
 var (
-	// ErrEmptyPath is returned by [New] when path is the empty string.
+	// ErrEmptyPath is returned by [New] when path is empty.
 	ErrEmptyPath = errors.New("watcher: path must not be empty")
 
-	// ErrNilContext is returned by [Source.Watch] when the supplied
-	// context is nil.
+	// ErrNilContext is returned by [Source.Watch] for a nil context.
 	ErrNilContext = errors.New("watcher: nil context")
 
-	// ErrClosed is returned by [Source.Watch] when called on a Source
-	// that has already been closed via [Source.Close].
+	// ErrClosed is returned by [Source.Watch] after [Source.Close].
 	ErrClosed = errors.New("watcher: source closed")
 )
 
 // Source is a fsnotify-backed [env.Source] for a single `.env` file.
-// It re-parses the file on disk changes and broadcasts an [env.Change]
-// (carrying the keys that were added, modified, or removed) to every
-// active subscriber returned by [Source.Watch].
+// It re-parses on disk changes and broadcasts an [env.Change] to every
+// active subscriber. Implements [env.Source] (composes into the
+// loader's source chain) and [env.Watcher] (delivers push events to
+// [env.Loader.Watch] and [env.Live]).
 //
-// Source implements [env.Source] (so [Source.Lookup] can compose with
-// the rest of the loader's source chain) and [env.Watcher] (so the
-// loader's Watch / Live[T] machinery — Phase 11 — can subscribe to
-// file-change events without polling).
-//
-// Source must be created with [New]; the zero value is not usable. Call
+// Construct with [New]; the zero value is not usable. Call
 // [Source.Close] to release the underlying fsnotify resources.
 type Source struct {
 	absPath string
@@ -60,21 +53,16 @@ type Source struct {
 	doneCh    chan struct{}
 }
 
-// Compile-time assertions.
 var (
 	_ env.Source  = (*Source)(nil)
 	_ env.Watcher = (*Source)(nil)
 )
 
 // New constructs a [*Source] for the `.env` file at path. The parent
-// directory is registered with fsnotify; events on other files in the
-// same directory are filtered out. New performs an initial parse of the
-// target file before returning, so the values are immediately available
-// via [Source.Lookup]. The target file MUST exist at New time; for
-// "create the .env later" workflows, write an empty file first.
-//
-// Callers must invoke [Source.Close] when finished to release the
-// fsnotify watcher.
+// directory is registered with fsnotify and events on sibling files
+// are filtered out. The file must exist at New time — for "create
+// later" workflows, write an empty file first. Callers must invoke
+// [Source.Close] to release the fsnotify watcher.
 func New(path string, opts ...Option) (*Source, error) {
 	if path == "" {
 		return nil, ErrEmptyPath
@@ -91,7 +79,7 @@ func New(path string, opts ...Option) (*Source, error) {
 		opt(&cfg)
 	}
 
-	// Initial parse — surfaces "file missing" / "syntax error" eagerly.
+	// Eager parse so missing-file / syntax errors surface from New.
 	values, err := loadFile(abs, cfg.parseOptions)
 	if err != nil {
 		return nil, err
@@ -123,10 +111,8 @@ func New(path string, opts ...Option) (*Source, error) {
 // Path returns the absolute path of the watched file.
 func (s *Source) Path() string { return s.absPath }
 
-// Lookup implements [env.Source]. The returned value reflects the most
-// recent successful parse of the target file. Concurrent with Lookup,
-// the watcher's worker goroutine may install a fresh values map; Lookup
-// is safe for concurrent use.
+// Lookup implements [env.Source] and returns the value from the most
+// recent successful parse. Safe for concurrent use.
 func (s *Source) Lookup(key string) (string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -134,16 +120,12 @@ func (s *Source) Lookup(key string) (string, bool) {
 	return v, ok
 }
 
-// Watch implements [env.Watcher]. Returns a channel that delivers an
-// [env.Change] every time the target file changes on disk. The channel
-// is closed when ctx is canceled OR when [Source.Close] is called,
-// whichever fires first. Each call to Watch returns an independent
-// subscription.
-//
-// The channel is buffered (capacity 1). If a subscriber is too slow to
-// drain, subsequent change notifications during the backlog are dropped
-// — the loader treats every Change as "re-read everything," so missing
-// individual fan-out events is benign.
+// Watch implements [env.Watcher] and returns a buffered (cap=1)
+// channel that delivers an [env.Change] every time the target file
+// changes. The channel closes when ctx is canceled or [Source.Close]
+// runs. Each call to Watch returns an independent subscription.
+// Surplus events on a slow subscriber are dropped; reloads are
+// idempotent.
 func (s *Source) Watch(ctx context.Context) (<-chan env.Change, error) {
 	if ctx == nil {
 		return nil, ErrNilContext
@@ -168,10 +150,9 @@ func (s *Source) Watch(ctx context.Context) (<-chan env.Change, error) {
 	return ch, nil
 }
 
-// Close stops the watcher and releases the underlying fsnotify resources.
-// Calling Close more than once is safe; subsequent calls are no-ops. After
-// Close, every active subscription channel is closed and Lookup continues
-// to return the values from the last successful parse.
+// Close stops the watcher and releases its fsnotify resources.
+// Idempotent. Active subscription channels are closed; [Source.Lookup]
+// continues to return the values from the last successful parse.
 func (s *Source) Close() error {
 	var err error
 	s.closeOnce.Do(func() {
@@ -190,9 +171,9 @@ func (s *Source) Close() error {
 	return err
 }
 
-// run is the worker goroutine. It owns the debouncer and the fsnotify
-// channels exclusively; the watcher's mutable state (`values` and
-// `subscribers`) is touched under their respective locks.
+// run is the worker goroutine. It owns the debouncer and the
+// fsnotify channels; mutable state is guarded by the receiver's
+// locks.
 func (s *Source) run() {
 	defer close(s.doneCh)
 
@@ -223,12 +204,9 @@ func (s *Source) run() {
 	}
 }
 
-// matchesTarget reports whether an fsnotify event applies to the target
-// file. Comparison is by base name AND by full path: fsnotify on Linux
-// reports the path as given to Add() (the parent directory) joined with
-// the basename of the changed entry, but on macOS/Windows the absolute
-// form may differ in normalization. Comparing both covers every
-// platform.
+// matchesTarget reports whether the fsnotify event at path p applies
+// to the watched file. Both the basename and the parent directory are
+// checked; "." appears when the caller passed a bare filename.
 func (s *Source) matchesTarget(p string) bool {
 	if p == "" {
 		return false
@@ -236,21 +214,16 @@ func (s *Source) matchesTarget(p string) bool {
 	if filepath.Base(p) != s.name {
 		return false
 	}
-	// Restrict to the parent directory we actually registered, so that
-	// events for a same-named file in some sibling directory (which
-	// fsnotify shouldn't report anyway) are ignored defensively.
 	dir := filepath.Dir(p)
 	if dir != s.parent && dir != "." {
-		// "." appears when the caller passed a bare filename — accept.
 		return false
 	}
 	return true
 }
 
-// reload re-parses the target file, computes the diff against the last
-// successful parse, swaps the values map, and broadcasts an env.Change
-// on every active subscription channel. If the re-parse fails the old
-// values are retained and the failure is logged.
+// reload re-parses the file, swaps the values map under the write
+// lock, and broadcasts an [env.Change] for the diff. Failures are
+// logged; the old values are retained.
 func (s *Source) reload() {
 	values, err := loadFile(s.absPath, s.opts.parseOptions)
 	if err != nil {
@@ -268,11 +241,8 @@ func (s *Source) reload() {
 	s.broadcast(change)
 }
 
-// broadcast delivers change to every active subscription channel using
-// non-blocking sends. A channel that is full (the subscriber hasn't
-// drained the previous Change yet) drops this fan-out; the loader's
-// reload path treats Change events as idempotent, so the dropped event
-// merely delays — never corrupts — the next reload.
+// broadcast delivers change to every active subscriber non-
+// blockingly; full channels drop the fan-out (reloads are idempotent).
 func (s *Source) broadcast(change env.Change) {
 	s.subMu.Lock()
 	defer s.subMu.Unlock()
@@ -286,9 +256,8 @@ func (s *Source) broadcast(change env.Change) {
 	}
 }
 
-// removeSubscriber removes ch from the subscribers slice and closes it.
-// Safe to call multiple times for the same channel; the second call is
-// a no-op (the channel is already removed and closed).
+// removeSubscriber removes ch from the subscribers slice and closes
+// it. Idempotent.
 func (s *Source) removeSubscriber(ch chan env.Change) {
 	s.subMu.Lock()
 	defer s.subMu.Unlock()
@@ -300,10 +269,6 @@ func (s *Source) removeSubscriber(ch chan env.Change) {
 	close(ch)
 }
 
-// loadFile parses the dotenv file at path with the given parser options
-// and returns its key/value map. Any parse error from dotenv.Load is
-// returned unchanged; "file does not exist" is reported as the standard
-// `*fs.PathError` from the underlying ReadFile.
 func loadFile(path string, parseOpts []dotenv.ParseOption) (map[string]string, error) {
 	m, err := dotenv.Load(path, parseOpts...)
 	if err != nil {
@@ -312,12 +277,8 @@ func loadFile(path string, parseOpts []dotenv.ParseOption) (map[string]string, e
 	return m, nil
 }
 
-// diffKeys returns the sorted union of keys whose values differ between
-// old and next (added, modified, or removed). The slice is empty when
-// the two maps are equal — empty Keys still triggers a reload at the
-// loader level (semantics: "the source signaled a change but did not
-// identify which keys"), but the watcher prefers to emit a precise list
-// when the diff is computable.
+// diffKeys returns the sorted union of keys whose values differ
+// between old and next.
 func diffKeys(old, next map[string]string) []string {
 	if len(old) == 0 && len(next) == 0 {
 		return nil
@@ -337,8 +298,7 @@ func diffKeys(old, next map[string]string) []string {
 	return out
 }
 
-// snapshot returns a copy of the current values map (used by tests and
-// for diagnostics). Concurrent-safe.
+// snapshot returns a copy of the current values map.
 func (s *Source) snapshot() map[string]string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

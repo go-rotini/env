@@ -886,12 +886,10 @@ func TestEncode_RoundTrip_QuotedValues(t *testing.T) {
 	}
 }
 
-// parseEncodedToMap is a minimal dotenv-style parser sufficient for the
-// round-trip tests above. It handles bare values, double-quoted values
-// with the standard escape table, comments, and `export` prefixes.
-//
-// A real parser lands in the env/dotenv sub-package in Phase 9; this
-// helper is only used to exercise the encoder's output shape.
+// parseEncodedToMap is a minimal parser exercising the encoder's
+// output shape: bare values, double-quoted values with the standard
+// escape table, comments, and `export ` prefixes. The full parser
+// lives in env/dotenv.
 func parseEncodedToMap(t *testing.T, src string) map[string]string {
 	t.Helper()
 	out := make(map[string]string)
@@ -1043,15 +1041,14 @@ func TestEncode_QuoteAllForcesQuoting(t *testing.T) {
 	}
 }
 
-// Sanity that formatValue is dead-code-free even via a contrived path.
+// Control bytes outside the escape table round-trip as their literal
+// form within the double-quoted output.
 func TestQuoteValueRendersControlChars(t *testing.T) {
 	got := quoteValue("\x01\x02\x03")
-	// Non-escape-table control chars round-trip as their literal bytes
-	// (no \xHH escape in Phase 6's quoteValue). Future enhancement.
 	if !strings.HasPrefix(got, `"`) || !strings.HasSuffix(got, `"`) {
 		t.Errorf("got %q", got)
 	}
-	_ = fmt.Sprintf("%q", got) // exercise representation
+	_ = fmt.Sprintf("%q", got)
 }
 
 // --- failing writer ---

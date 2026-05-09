@@ -2,11 +2,10 @@ package dotenv
 
 import "github.com/go-rotini/env"
 
-// ParseOption configures [Parse], [Load], [NewSource], [NewReaderSource],
-// and [Lint].
+// ParseOption configures [Parse], [Load], [NewSource],
+// [NewReaderSource], and [Lint].
 type ParseOption func(*parseOptions)
 
-// parseOptions holds the resolved configuration.
 type parseOptions struct {
 	expand            bool
 	strictExpansion   bool
@@ -17,7 +16,7 @@ type parseOptions struct {
 	maxFileSize       int64
 	maxLineLength     int
 	relaxedNames      bool
-	filePath          string // set internally by Load / NewSource
+	filePath          string
 }
 
 func defaultParseOptions() parseOptions {

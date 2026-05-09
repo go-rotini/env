@@ -15,65 +15,55 @@ import (
 	"unicode"
 )
 
-// fieldDescriptor describes one resolved leaf field after walking a struct.
-// It is the unit consumed by the loader pipeline.
-//
-// Key already includes any envPrefix accumulation from enclosing structs but
-// does NOT include the loader-level WithPrefix; the loader applies its
-// prefix at lookup time so that field descriptors can be cached per
-// reflect.Type independent of any particular Loader configuration.
+// fieldDescriptor is one resolved leaf field after walking a struct.
+// Key includes any envPrefix accumulation but not the loader-level
+// [WithPrefix], which is applied at lookup so descriptors can be cached
+// per [reflect.Type] independently of loader configuration.
 type fieldDescriptor struct {
-	// Index is the path through nested structs, suitable for
-	// [reflect.Value.FieldByIndex].
+	// Index is the [reflect.Value.FieldByIndex] path.
 	Index []int
 
-	// GoName is the exact Go field name (e.g. "Port").
+	// GoName is the Go field name.
 	GoName string
 
-	// GoPath is the dotted Go field path used for diagnostics
-	// (e.g. "DB.URL"). Anonymous-embedded fields are promoted, so the
-	// path follows the embedded-field access convention.
+	// GoPath is the dotted Go path used in diagnostics ("DB.URL").
 	GoPath string
 
-	// Key is the resolved env-var name after envPrefix accumulation but
-	// before loader-level WithPrefix. The loader prepends WithPrefix at
-	// lookup time.
+	// Key is the resolved env-var name (without [WithPrefix]).
 	Key string
 
-	// Description is the free-text help string from the envDesc tag.
+	// Description is the envDesc tag text.
 	Description string
 
-	// Tag-driven flags / values.
 	Required     bool
 	NotEmpty     bool
 	HasDefault   bool
 	DefaultValue string
-	Separator    string // empty means use the loader default ","
-	KVSeparator  string // empty means use the loader default ":"
+	Separator    string
+	KVSeparator  string
 	Expand       bool
 	FromFile     bool
 	Unset        bool
 	Secret       bool
 	Immutable    bool
-	Layout       string // for time.Time
+	Layout       string
 	Base64       bool
 	Hex          bool
 }
 
-// structInfo is the cached field-collection result for a single struct
-// type. Err is non-nil for types whose tags or shape are invalid; the
-// loader returns Err on every Load against such a type without re-walking.
+// structInfo is the cached field-collection result for a struct type.
+// Err is non-nil for invalid tags or shapes; the loader returns it
+// without re-walking.
 type structInfo struct {
 	Fields []fieldDescriptor
 	Err    error
 }
 
-// structInfoCache memoizes the per-type field walk. Keyed by reflect.Type.
 var structInfoCache sync.Map
 
-// getStructInfo returns the cached structInfo for t, walking and storing
-// it on first request. Concurrent callers race to populate the cache; the
-// loser's walk is discarded and both observe the winner's value.
+// getStructInfo returns the cached structInfo for t, walking on the
+// first request. Concurrent callers race; the loser's walk is
+// discarded.
 func getStructInfo(t reflect.Type) *structInfo {
 	if cached, ok := structInfoCache.Load(t); ok {
 		info, _ := cached.(*structInfo)
@@ -103,15 +93,9 @@ func collectStructInfo(t reflect.Type) *structInfo {
 	}
 }
 
-// walker carries the cross-recursion state for collectStructInfo: the
-// accumulated descriptor list, the seen-key map for conflict detection,
-// and the error list. Pointer-receiver methods are used throughout so the
-// recursion mutates the same instance.
-//
-// tagName and fieldNameXform are configurable; the package-default cache
-// path uses "env" and toScreamingSnake. Loaders configured with
-// [WithTagName] or [WithFieldNameTransform] construct a walker with
-// custom values and bypass the cache.
+// walker carries the cross-recursion state for collectStructInfo.
+// Loaders configured with [WithTagName] or [WithFieldNameTransform]
+// supply custom tagName / fieldNameXform values and bypass the cache.
 type walker struct {
 	fields         []fieldDescriptor
 	seen           map[string]string
@@ -121,10 +105,8 @@ type walker struct {
 }
 
 // walk recursively walks t, populating w.fields and w.errs.
-//
-// parentIndex is the FieldByIndex prefix for fields below t.
-// parentPrefix is the accumulated envPrefix string.
-// parentGoPath is the dotted Go path to t ("" at the root).
+// parentIndex is the FieldByIndex prefix; parentPrefix is the
+// accumulated envPrefix; parentGoPath is the dotted Go path to t.
 func (w *walker) walk(t reflect.Type, parentIndex []int, parentPrefix, parentGoPath string) {
 	for i := range t.NumField() {
 		f := t.Field(i)
@@ -149,31 +131,26 @@ func (w *walker) walk(t reflect.Type, parentIndex []int, parentPrefix, parentGoP
 		envPrefix := f.Tag.Get("envPrefix")
 		envDesc := f.Tag.Get("envDesc")
 
-		// Resolve to the underlying struct type for recursion checks,
-		// dereferencing any pointer indirection.
 		ft := f.Type
 		for ft.Kind() == reflect.Pointer {
 			ft = ft.Elem()
 		}
 
-		// Anonymous embed of a non-leaf struct: recurse without adding
-		// the embed's name to the Go path (Go promotes the inner fields).
+		// Anonymous embed: recurse without prepending the embed's name
+		// (Go promotes inner fields).
 		if f.Anonymous && ft.Kind() == reflect.Struct && !isLeafStruct(ft) {
 			w.walk(ft, index, parentPrefix+envPrefix, parentGoPath)
 			continue
 		}
 
-		// Named struct field with no env tag: recurse if the type is a
-		// non-leaf struct. With an env tag the field is treated as a leaf
-		// (the user has explicitly opted into a single key for the whole
-		// value, and the decoder is expected to handle it).
+		// Named struct field with no env tag: recurse. An explicit env
+		// tag opts into treating the whole struct as a single keyed
+		// leaf for the decoder to handle.
 		if !hasEnvTag && ft.Kind() == reflect.Struct && !isLeafStruct(ft) && f.IsExported() {
 			w.walk(ft, index, parentPrefix+envPrefix, goPath)
 			continue
 		}
 
-		// Skip any unexported anonymous field that wasn't a struct we
-		// could recurse into (e.g., embedded interface).
 		if !f.IsExported() {
 			continue
 		}
@@ -223,9 +200,9 @@ func (w *walker) walk(t reflect.Type, parentIndex []int, parentPrefix, parentGoP
 	}
 }
 
-// fieldTag is the parsed result of one `env:"..."` tag.
+// fieldTag is the parsed body of one `env:"..."` tag.
 type fieldTag struct {
-	Name string // explicit name, "" means "use default name transform"
+	Name string
 
 	Required     bool
 	NotEmpty     bool
@@ -243,16 +220,10 @@ type fieldTag struct {
 	Hex          bool
 }
 
-// parseFieldTag parses the body of an `env:"..."` tag value.
-//
-// A tag of "-" elsewhere is checked by the caller; this function is invoked
-// only on non-skip tags. An empty raw string yields a zero-valued fieldTag
-// (i.e., "use default name, no options"), which is the same shape as a tag
-// of `env:""`.
-//
-// Option values cannot contain commas; the separator-comma is reserved by
-// the option list. For free-text help with arbitrary content use the
-// envDesc companion tag.
+// parseFieldTag parses the body of an `env:"..."` tag. The "-" skip
+// case is filtered by the caller. Option values cannot contain commas
+// (reserved by the option list); use the envDesc companion tag for
+// free-text content.
 func parseFieldTag(raw string) (fieldTag, error) {
 	t := fieldTag{}
 	if raw == "" {
@@ -310,26 +281,20 @@ func parseFieldTag(raw string) (fieldTag, error) {
 	return t, nil
 }
 
-// toScreamingSnake transforms a Go field name into its SCREAMING_SNAKE_CASE
-// env-var equivalent with acronym detection. Examples:
+// toScreamingSnake transforms a Go field name into SCREAMING_SNAKE_CASE
+// with acronym detection:
 //
 //	Port         -> PORT
 //	DatabaseURL  -> DATABASE_URL
-//	HTTPSPort    -> HTTPS_PORT     (acronym ends before "Port")
-//	IPv4Address  -> IPV4_ADDRESS   (single 'v' is part of "IPv4")
-//	URLs         -> URLS           (single trailing lower is acronym suffix)
+//	HTTPSPort    -> HTTPS_PORT
+//	IPv4Address  -> IPV4_ADDRESS
+//	URLs         -> URLS
 //	camelCase    -> CAMEL_CASE
 //
-// Boundary rules:
-//
-//  1. Lowercase or digit followed by uppercase: insert underscore.
-//  2. Uppercase followed by uppercase, where the second uppercase is followed
-//     by at least two lowercase letters in a row: insert underscore (a real
-//     word, not a 1-character suffix of the acronym).
-//
-// All boundary insertions happen between letters; non-letter / non-digit
-// runes (such as existing underscores) pass through unchanged. The result
-// is upper-cased as a final step.
+// Underscore is inserted (1) between a lowercase/digit and a following
+// uppercase, and (2) between two uppercases when the second uppercase
+// begins a run of two or more lowercase letters (a real word, not a
+// trailing-acronym suffix).
 func toScreamingSnake(name string) string {
 	if name == "" {
 		return ""
@@ -354,12 +319,9 @@ func toScreamingSnake(name string) string {
 	return b.String()
 }
 
-// builtinLeafStructTypes is the set of well-known struct types treated as
-// opaque leaves by the field walker. Most user-facing types in this set
-// also implement [encoding.TextUnmarshaler] or [encoding.BinaryUnmarshaler]
-// and would be detected by the interface check; they are listed explicitly
-// for performance and to cover types like [net.IPNet] and [regexp.Regexp]
-// that implement neither.
+// builtinLeafStructTypes are struct types the walker treats as opaque
+// leaves. Listed explicitly for performance and to cover types like
+// [net.IPNet] that implement no unmarshaler interface.
 var builtinLeafStructTypes = map[reflect.Type]struct{}{
 	reflect.TypeFor[time.Time]():     {},
 	reflect.TypeFor[time.Location](): {},
@@ -376,15 +338,10 @@ var (
 	binaryUnmarshalerType = reflect.TypeFor[encoding.BinaryUnmarshaler]()
 )
 
-// isLeafStruct reports whether t is a struct type the field walker should
-// treat as an opaque leaf rather than recursing into.
-//
-// A struct is a leaf when:
-//  1. It is in the built-in registry of well-known special types.
-//  2. *T implements [encoding.TextUnmarshaler] or [encoding.BinaryUnmarshaler].
-//
-// Checking only *T is sufficient: Go's method-set rules guarantee that if
-// T implements an interface (via value receivers), *T does too.
+// isLeafStruct reports whether t should be treated as an opaque leaf:
+// either it's in the built-in registry, or *T implements
+// [encoding.TextUnmarshaler] or [encoding.BinaryUnmarshaler]. (*T
+// suffices: Go's method sets promote value-receiver methods.)
 func isLeafStruct(t reflect.Type) bool {
 	if _, ok := builtinLeafStructTypes[t]; ok {
 		return true

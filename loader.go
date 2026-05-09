@@ -9,17 +9,16 @@ import (
 	"strings"
 )
 
-// Loader is a configured environment-variable loader. Construct with [New];
-// safe for concurrent use after construction.
+// Loader is a configured environment-variable loader. Construct with
+// [New]; safe for concurrent use after construction.
 type Loader struct {
 	opts loaderOptions
 }
 
-// New returns a [Loader] with the given options applied to the defaults.
-//
-// Defaults: source chain = [[OSEnv]], no prefix, tag name "env",
-// SCREAMING_SNAKE_CASE field-name transform, no logger, POSIX-strict
-// identifier rules, optional-by-default field policy.
+// New returns a [Loader] with opts applied to the defaults: source
+// chain = [[OSEnv]], no prefix, tag name "env", SCREAMING_SNAKE_CASE
+// field-name transform, no logger, POSIX-strict identifier rules,
+// optional-by-default field policy.
 func New(opts ...Option) *Loader {
 	o := defaultLoaderOptions()
 	for _, opt := range opts {
@@ -28,24 +27,16 @@ func New(opts ...Option) *Loader {
 	return &Loader{opts: o}
 }
 
-// Load decodes environment variables (or other source values) into v.
-//
-// v must be a non-nil pointer to a struct. Per-field errors are
-// aggregated into a [*MultiError]; if any field fails, Load returns
-// the aggregated error after attempting every field.
-//
-// Field-collection errors (conflicting names, unknown tag options) are
-// returned directly without wrapping in MultiError, since they are
-// permanent for the target type.
+// Load decodes the configured sources into v. v must be a non-nil
+// pointer to a struct. Per-field errors aggregate into a [*MultiError]
+// after every field is attempted; field-collection errors (conflicting
+// names, unknown tag options) are returned directly.
 func (l *Loader) Load(v any) error {
 	return l.LoadContext(context.Background(), v)
 }
 
-// LoadContext is like [Loader.Load] but accepts a context.
-//
-// In Phase 5 the context is not yet consumed; Phase 7 wires it into the
-// Mutator and Validator hooks, and Phase 11 wires it into Live[T]
-// reload propagation.
+// LoadContext is like [Loader.Load] but accepts a context. ctx is
+// forwarded to the [Mutator] chain and to the [Validator] hook.
 func (l *Loader) LoadContext(ctx context.Context, v any) error {
 	if v == nil {
 		return ErrNilPointer
@@ -71,9 +62,8 @@ func (l *Loader) LoadContext(ctx context.Context, v any) error {
 		l.populateField(ctx, rv, fd, src, multi)
 	}
 
-	// Whole-struct validator hook. Skipped when per-field errors exist:
-	// the struct is in a partial state and Validate would likely produce
-	// noise that compounds with the parse errors.
+	// Skip whole-struct validation when per-field errors exist; the
+	// struct is in a partial state and Validate would amplify noise.
 	if len(multi.Errors) == 0 {
 		if v, ok := rv.Addr().Interface().(Validator); ok {
 			if err := v.Validate(); err != nil {
@@ -88,14 +78,11 @@ func (l *Loader) LoadContext(ctx context.Context, v any) error {
 	return nil
 }
 
-// Snapshot captures the current resolved values for every recognized
-// field of v as a map[string]string keyed by the resolved env-var name
-// (with [WithPrefix] applied). Defaults from default= tags are emitted
-// for keys not present in the source chain. Fields whose Source returns
-// ok=false and which have no default are omitted.
-//
-// Useful for tests and debugging: pass the result to [Map] to construct
-// a Source that mirrors the live snapshot.
+// Snapshot returns the resolved values for every recognized field of
+// v as a map keyed by env-var name (with [WithPrefix] applied).
+// Defaults are emitted for keys absent from the source chain; fields
+// with no source value and no default are omitted. Useful for tests
+// and debugging — pass the result to [Map] to mirror the live state.
 func (l *Loader) Snapshot(v any) (map[string]string, error) {
 	if v == nil {
 		return nil, ErrNilPointer
@@ -129,12 +116,6 @@ func (l *Loader) Snapshot(v any) (map[string]string, error) {
 	return out, nil
 }
 
-// structInfo returns the cached or freshly-walked structInfo for t,
-// honoring the loader's tag-name and field-name-transform options.
-//
-// The Phase 3 cache (defaultStructCache via getStructInfo) is keyed by
-// reflect.Type alone and assumes the default config. When the loader
-// uses non-default options, we re-walk on every call.
 func (l *Loader) structInfo(t reflect.Type) (*structInfo, error) {
 	info := l.lookupStructInfo(t)
 	if info.Err != nil {
@@ -143,6 +124,9 @@ func (l *Loader) structInfo(t reflect.Type) (*structInfo, error) {
 	return info, nil
 }
 
+// lookupStructInfo serves from the package-wide cache when the loader
+// runs with default tag-walk config; non-default loaders bypass the
+// cache and re-walk per call.
 func (l *Loader) lookupStructInfo(t reflect.Type) *structInfo {
 	if l.usesDefaultWalkConfig() {
 		return getStructInfo(t)
@@ -160,8 +144,6 @@ func (l *Loader) usesDefaultWalkConfig() bool {
 	return true
 }
 
-// collectStructInfoFresh re-walks t with this loader's tag-name and
-// field-name-transform options. Returned info is NOT cached.
 func (l *Loader) collectStructInfoFresh(t reflect.Type) *structInfo {
 	if t.Kind() != reflect.Struct {
 		return &structInfo{
@@ -180,8 +162,6 @@ func (l *Loader) collectStructInfoFresh(t reflect.Type) *structInfo {
 	}
 }
 
-// composedSource returns the loader's effective Source chain as a single
-// Source. Empty chains return a no-op Source.
 func (l *Loader) composedSource() Source {
 	switch len(l.opts.sources) {
 	case 0:
@@ -197,20 +177,15 @@ func (l *Loader) composedSource() Source {
 //  1. Source lookup.
 //  2. Default application (if not sourced).
 //  3. Mutator chain (may rewrite or synthesize).
-//  4. Required / notEmpty checks (after mutator so synthesized values
-//     can satisfy required).
-//  5. fromFile substitution (read file contents as the actual value).
+//  4. Required / notEmpty checks.
+//  5. fromFile substitution (read file contents as the value).
 //  6. Decode (custom decoder or built-in).
-//  7. unset (call os.Unsetenv on the resolved key, unless [WithoutUnset]).
-//
-// (Phase 9) Variable expansion is a step between the mutator chain and
-// fromFile when fd.Expand is set. (Phase 11) Immutable enforcement
-// happens at the Live[T] level, not here.
+//  7. unset (call os.Unsetenv unless [WithoutUnset]).
 func (l *Loader) populateField(ctx context.Context, root reflect.Value, fd fieldDescriptor, src Source, multi *MultiError) {
 	resolvedKey := l.opts.prefix + fd.Key
 
 	rawValue, sourced := src.Lookup(resolvedKey)
-	originalValue := rawValue // captured for the mutator chain (always the source's view)
+	originalValue := rawValue
 	hasValue := sourced
 
 	if !sourced && fd.HasDefault {
@@ -218,9 +193,6 @@ func (l *Loader) populateField(ctx context.Context, root reflect.Value, fd field
 		hasValue = true
 	}
 
-	// Mutator chain runs after default application but before checks /
-	// fromFile / decode. A mutator may rewrite the current value or
-	// synthesize a value for an otherwise-unset field.
 	for _, m := range l.opts.mutators {
 		nv, stop, err := m.MutateEnv(ctx, fd.Key, resolvedKey, originalValue, rawValue, sourced)
 		if err != nil {
@@ -229,7 +201,6 @@ func (l *Loader) populateField(ctx context.Context, root reflect.Value, fd field
 		}
 		rawValue = nv
 		if !hasValue && nv != "" {
-			// Mutator synthesized a value for an unset/no-default field.
 			hasValue = true
 		}
 		if stop {
@@ -237,8 +208,6 @@ func (l *Loader) populateField(ctx context.Context, root reflect.Value, fd field
 		}
 	}
 
-	// Required / requireAll checks run AFTER the mutator chain so a
-	// mutator can satisfy them by synthesizing a value.
 	if !hasValue {
 		if fd.Required || fd.NotEmpty || (l.opts.requireAll && !fd.HasDefault) {
 			multi.Append(&MissingRequiredError{
@@ -247,7 +216,6 @@ func (l *Loader) populateField(ctx context.Context, root reflect.Value, fd field
 			})
 			return
 		}
-		// Unset and optional: leave the field at its zero value.
 		return
 	}
 
@@ -259,9 +227,8 @@ func (l *Loader) populateField(ctx context.Context, root reflect.Value, fd field
 		return
 	}
 
-	// fromFile: treat the resolved value as a path; read its contents.
-	// A single trailing \n or \r\n is stripped, matching the convention
-	// used by `kubectl create secret --from-file`.
+	// fromFile: trim a single trailing \n or \r\n, matching how
+	// `kubectl create secret --from-file` round-trips.
 	if fd.FromFile && rawValue != "" {
 		data, err := os.ReadFile(rawValue)
 		if err != nil {
@@ -294,12 +261,11 @@ func (l *Loader) populateField(ctx context.Context, root reflect.Value, fd field
 	l.maybeUnset(fd, resolvedKey)
 }
 
-// maybeUnset honors the unset tag option after a successful decode. The
-// global [WithoutUnset] disables the behavior. Calls os.Unsetenv, which is
-// not thread-safe under cgo (POSIX setenv(3) / unsetenv(3) can race with
-// concurrent getaddrinfo via GODEBUG=netdns=cgo); callers using the unset
-// tag accept that the loader does an os-level write. The loader serializes
-// these calls within a single Load — perform initial Load before spawning
+// maybeUnset honors the `unset` tag after a successful decode (no-op
+// under [WithoutUnset]). os.Unsetenv is not thread-safe under cgo
+// (POSIX setenv/unsetenv can race with getaddrinfo when
+// GODEBUG=netdns=cgo); the loader serializes calls within a single
+// Load. Callers should perform their initial Load before spawning
 // goroutines that may trigger cgo lookups.
 func (l *Loader) maybeUnset(fd fieldDescriptor, resolvedKey string) {
 	if !fd.Unset || l.opts.withoutUnset {
@@ -308,14 +274,11 @@ func (l *Loader) maybeUnset(fd fieldDescriptor, resolvedKey string) {
 	_ = os.Unsetenv(resolvedKey)
 }
 
-// fieldByIndexAlloc walks the FieldByIndex path on root, allocating any
-// nil intermediate pointer-to-struct fields along the way.
-//
-// Stdlib's [reflect.Value.FieldByIndex] panics on a nil intermediate
-// pointer; we explicitly auto-allocate. The Loader's preconditions
-// (non-nil pointer to struct) guarantee root is settable, which in turn
-// guarantees every descendant field is settable, so allocation always
-// succeeds; no error path is needed.
+// fieldByIndexAlloc walks index on root, allocating nil intermediate
+// pointer-to-struct fields. Avoids the panic from
+// [reflect.Value.FieldByIndex] on nil intermediates. Loader
+// preconditions guarantee every descendant is settable, so allocation
+// always succeeds.
 func fieldByIndexAlloc(root reflect.Value, index []int) reflect.Value {
 	v := root
 	for i, idx := range index {
@@ -330,16 +293,16 @@ func fieldByIndexAlloc(root reflect.Value, index []int) reflect.Value {
 	return v
 }
 
-// annotateParseError augments a [*ParseError] returned from the decoder
-// with field-level context, redacting the value if the field is tagged
-// secret. Other error types are returned unchanged.
+// annotateParseError adds field context to a [*ParseError] returned by
+// the decoder, redacting the value (and the cause, since stdlib parse
+// errors quote the raw value) for secret-tagged fields. Non-ParseError
+// returns are passed through.
 func (l *Loader) annotateParseError(err error, fd fieldDescriptor, key, value string, typ reflect.Type) error {
 	var pe *ParseError
 	if !errors.As(err, &pe) {
 		return err
 	}
-	// Build a copy to avoid mutating an error owned by the decoder
-	// (which may be a sentinel or shared with another goroutine).
+	// Copy to avoid mutating a sentinel or shared error.
 	out := *pe
 	out.Field = fd.GoPath
 	out.Key = key
@@ -351,18 +314,11 @@ func (l *Loader) annotateParseError(err error, fd fieldDescriptor, key, value st
 	}
 	if fd.Secret {
 		out.Value = l.redactor()(out.Value)
-		// Wipe the underlying cause too: stdlib parse errors typically
-		// include the raw value in their Error() text (strconv prefixes
-		// "parsing %q"), which would leak the secret. We trade a tiny
-		// bit of diagnostic detail for guaranteed redaction.
 		out.Cause = nil
 	}
 	return &out
 }
 
-// redactor returns the loader's secret redactor, or the package default
-// if the loader was constructed before Phase 7 (defensive — every Loader
-// constructed via [New] has the default set).
 func (l *Loader) redactor() func(string) string {
 	if l.opts.secretRedactor != nil {
 		return l.opts.secretRedactor

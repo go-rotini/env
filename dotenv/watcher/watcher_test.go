@@ -19,8 +19,6 @@ import (
 
 // --- helpers ---
 
-// writeFile writes data to path with the standard test mode. Failing the
-// test — rather than returning the error — makes call sites tighter.
 func writeFile(t *testing.T, path string, data string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
@@ -28,10 +26,7 @@ func writeFile(t *testing.T, path string, data string) {
 	}
 }
 
-// waitChange drains one event from ch with a generous timeout. The
-// timeout is long enough that flakes only happen if the worker is
-// genuinely stuck; the watcher's debounce is 75ms by default so a 3s
-// upper bound provides ~40x headroom.
+// waitChange drains one event from ch within 3s.
 func waitChange(t *testing.T, ch <-chan env.Change, msg string) env.Change {
 	t.Helper()
 	select {
@@ -46,8 +41,7 @@ func waitChange(t *testing.T, ch <-chan env.Change, msg string) env.Change {
 	return env.Change{}
 }
 
-// drainChange returns true if a Change arrives within d, false on
-// timeout. Used for negative assertions ("no change should fire here").
+// drainChange waits up to d for a Change. Used for negative assertions.
 func drainChange(ch <-chan env.Change, d time.Duration) (env.Change, bool) {
 	select {
 	case c := <-ch:
@@ -57,9 +51,6 @@ func drainChange(ch <-chan env.Change, d time.Duration) (env.Change, bool) {
 	}
 }
 
-// fastWatcher returns a watcher whose debounce is short enough that
-// tests don't spend their lives waiting. Production callers get the
-// 75ms default.
 func fastWatcher(t *testing.T, path string, opts ...Option) *Source {
 	t.Helper()
 	all := append([]Option{WithDebounce(20 * time.Millisecond)}, opts...)
@@ -117,7 +108,6 @@ func TestNew_InvalidContentErrors(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".env")
-	// Unterminated single-quoted value triggers a dotenv parse error.
 	writeFile(t, path, "FOO='unterminated\n")
 
 	if _, err := New(path); err == nil {
@@ -131,13 +121,11 @@ func TestNew_ForwardsParseOptions(t *testing.T) {
 	path := filepath.Join(dir, ".env")
 	writeFile(t, path, "FIRST=hello\nSECOND=$FIRST\n")
 
-	// Without WithExpand, $FIRST stays literal.
 	s1 := fastWatcher(t, path)
 	if v, _ := s1.Lookup("SECOND"); v != "$FIRST" {
 		t.Errorf("without expand: SECOND = %q, want literal", v)
 	}
 
-	// With expand forwarded through options.
 	s2 := fastWatcher(t, path, WithParseOptions(dotenv.WithExpand()))
 	if v, _ := s2.Lookup("SECOND"); v != "hello" {
 		t.Errorf("with expand: SECOND = %q, want hello", v)
@@ -190,10 +178,7 @@ func TestWatch_AtomicRename(t *testing.T) {
 		t.Fatalf("Watch: %v", err)
 	}
 
-	// Editor "atomic save" pattern: write to a temp file, then rename
-	// it over the target. fsnotify on the parent dir sees a Create or
-	// Rename event for the target name; our worker filters by basename
-	// and re-parses.
+	// Atomic-save pattern: write to a tmp file, then rename it over the target.
 	tmp := filepath.Join(dir, ".env.tmp")
 	writeFile(t, tmp, "FOO=replaced\n")
 	if err := os.Rename(tmp, path); err != nil {
@@ -211,8 +196,6 @@ func TestWatch_AtomicRename(t *testing.T) {
 
 func TestWatch_DeleteAndRecreate(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		// On Windows, fsnotify reliably reports the recreate but
-		// deletion timing varies; skipping keeps CI deterministic.
 		t.Skip("delete-and-recreate timing unreliable on Windows fsnotify")
 	}
 	t.Parallel()
@@ -232,12 +215,10 @@ func TestWatch_DeleteAndRecreate(t *testing.T) {
 	if err := os.Remove(path); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
-	// Recreate. Even if a Change fires for the deletion (with the
-	// re-parse failing and the old values retained), the recreation
-	// must produce a Change with the NEW value.
+	// Recreate. The deletion event may produce a failed reload with
+	// retained old values; the recreation must produce a fresh Change.
 	writeFile(t, path, "FOO=after\nFRESH=yes\n")
 
-	// Drain up to two changes; the final state must reflect the new file.
 	deadline := time.Now().Add(3 * time.Second)
 	gotAfter := false
 	for time.Now().Before(deadline) {
@@ -266,8 +247,7 @@ func TestWatch_DebounceCoalescesBurst(t *testing.T) {
 	path := filepath.Join(dir, ".env")
 	writeFile(t, path, "FOO=0\n")
 
-	// Use a relatively slow debounce so the burst clearly falls inside
-	// one quiet period.
+	// Use a slow debounce so the burst falls inside one quiet period.
 	s, err := New(path, WithDebounce(150*time.Millisecond))
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -281,15 +261,12 @@ func TestWatch_DebounceCoalescesBurst(t *testing.T) {
 		t.Fatalf("Watch: %v", err)
 	}
 
-	// 5 writes in quick succession — well under the 150ms quiet period.
 	for i := 1; i <= 5; i++ {
 		writeFile(t, path, "FOO="+itoa(i)+"\n")
 		time.Sleep(15 * time.Millisecond)
 	}
 
 	first := waitChange(t, ch, "first coalesced change")
-	// Final value must be 5 (the last write); intermediate writes are
-	// observed indirectly via the single coalesced event.
 	if v, _ := s.Lookup("FOO"); v != "5" {
 		t.Errorf("after burst: FOO = %q, want 5", v)
 	}
@@ -297,8 +274,6 @@ func TestWatch_DebounceCoalescesBurst(t *testing.T) {
 		t.Errorf("first.Keys = %v, want to include FOO", first.Keys)
 	}
 
-	// No second change should fire — the burst was a single quiet
-	// period. Allow generous slack to weed out double-fire bugs.
 	if _, more := drainChange(ch, 250*time.Millisecond); more {
 		t.Error("got a second change event; debounce did not coalesce the burst")
 	}
@@ -349,12 +324,10 @@ func TestWatch_ContextCancelClosesOnlyOneSubscriber(t *testing.T) {
 
 	cancel1()
 
-	// ch1 must close; ch2 must still receive.
 	select {
 	case _, ok := <-ch1:
 		if ok {
-			// Some impls deliver a final value before closing; drain
-			// once more to confirm the close.
+			// A final value may arrive before close; drain again.
 			if _, stillOpen := <-ch1; stillOpen {
 				t.Error("ch1 should be closed after its context cancel")
 			}
@@ -382,7 +355,6 @@ func TestClose_IsIdempotent(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	// Second Close must not panic and must not return a new error.
 	if err := s.Close(); err != nil {
 		t.Errorf("second Close returned %v, want nil", err)
 	}
@@ -408,7 +380,7 @@ func TestClose_ClosesActiveSubscribers(t *testing.T) {
 	select {
 	case _, ok := <-ch:
 		if ok {
-			// Drain any in-flight change, then expect close.
+			// Drain an in-flight Change, then expect close.
 			if _, stillOpen := <-ch; stillOpen {
 				t.Error("subscriber channel still open after Close")
 			}
@@ -460,8 +432,6 @@ func TestReload_KeepsValuesOnParseFailure(t *testing.T) {
 	path := filepath.Join(dir, ".env")
 	writeFile(t, path, "FOO=good\n")
 
-	// Capture the worker's logger output to confirm the failure is
-	// observable.
 	var sb strings.Builder
 	mu := &sync.Mutex{}
 	logger := slog.New(slog.NewTextHandler(&lockedWriter{w: &sb, mu: mu},
@@ -480,11 +450,8 @@ func TestReload_KeepsValuesOnParseFailure(t *testing.T) {
 	defer cancel()
 	ch, _ := s.Watch(ctx)
 
-	// Write a syntactically invalid file. The reload must fail; FOO
-	// must retain its old value.
 	writeFile(t, path, "FOO='unterminated\n")
 
-	// Allow some time for the failed reload to be observed and logged.
 	if _, more := drainChange(ch, 200*time.Millisecond); more {
 		t.Error("a parse failure should NOT broadcast a change event")
 	}
@@ -498,8 +465,6 @@ func TestReload_KeepsValuesOnParseFailure(t *testing.T) {
 		t.Errorf("expected logger to capture reload failure, got %q", logged)
 	}
 
-	// Recover by writing a valid file — the watcher should start
-	// emitting events again.
 	writeFile(t, path, "FOO=better\n")
 	waitChange(t, ch, "after recovery")
 	if v, _ := s.Lookup("FOO"); v != "better" {
@@ -522,10 +487,8 @@ func TestBroadcast_SlowSubscriberDoesNotBlockWorker(t *testing.T) {
 	slow, _ := s.Watch(ctx)
 	fast, _ := s.Watch(ctx)
 
-	// Generate three sequential changes WITHOUT draining `slow`.
-	// The slow subscriber's buffered chan (cap=1) accepts one Change;
-	// subsequent Changes drop on the non-blocking send. The fast
-	// subscriber must still receive every event the worker emits.
+	// Three sequential changes without draining slow. slow's cap=1 buffer
+	// holds one event; the rest drop. fast must still receive every one.
 	writeFile(t, path, "FOO=1\n")
 	waitChange(t, fast, "fast #1")
 	writeFile(t, path, "FOO=2\n")
@@ -533,8 +496,7 @@ func TestBroadcast_SlowSubscriberDoesNotBlockWorker(t *testing.T) {
 	writeFile(t, path, "FOO=3\n")
 	waitChange(t, fast, "fast #3")
 
-	// Now drain the slow channel — it must have at least one queued
-	// event but never blocks the worker.
+	// slow must hold at least one queued event.
 	select {
 	case <-slow:
 	case <-time.After(time.Second):
@@ -713,13 +675,12 @@ func TestDebouncer_TapResets(t *testing.T) {
 	time.Sleep(40 * time.Millisecond)
 	d.tap() // should reset; first 40ms doesn't count toward the new 80ms.
 	time.Sleep(40 * time.Millisecond)
-	// 40ms after the second tap; should NOT have fired yet.
+	// 40ms after the second tap: should not have fired yet.
 	select {
 	case <-d.c():
 		t.Error("debouncer fired before quiet period elapsed")
 	default:
 	}
-	// Wait the rest of the quiet period plus some slack.
 	select {
 	case <-d.c():
 	case <-time.After(200 * time.Millisecond):
@@ -776,7 +737,6 @@ func TestSnapshot_ReturnsCopy(t *testing.T) {
 	if snap["FOO"] != "bar" || snap["BAZ"] != "qux" {
 		t.Errorf("snapshot = %v", snap)
 	}
-	// Mutating the snapshot must not affect the source.
 	snap["FOO"] = "modified"
 	if v, _ := s.Lookup("FOO"); v != "bar" {
 		t.Errorf("Lookup(FOO) after snapshot mutation = %q, want bar", v)
@@ -791,16 +751,13 @@ func TestCompileTime_InterfaceAssertions(t *testing.T) {
 		_ env.Source  = (*Source)(nil)
 		_ env.Watcher = (*Source)(nil)
 	)
-	// Defensive sanity check via errors.Is on a fabricated error.
 	if errors.Is(nil, errors.New("synthetic")) {
 		t.Fatal("errors.Is(nil, ...) should be false")
 	}
 }
 
-// --- small string helpers (stdlib-light) ---
+// --- helpers ---
 
-// itoa returns the base-10 ASCII form of n. Used to sidestep importing
-// strconv in tests just for itoa-equivalents.
 func itoa(n int) string {
 	if n == 0 {
 		return "0"
@@ -832,7 +789,7 @@ func mustAbs(t *testing.T, p string) string {
 	return abs
 }
 
-// --- locked writer for concurrent slog handler ---
+// --- locked writer for the test slog handler ---
 
 type lockedWriter struct {
 	w  *strings.Builder

@@ -9,14 +9,14 @@ import (
 
 // Live wraps a [Loader] in an atomic-pointer-swapping live-reload
 // container. After [NewLive] returns, [Live.Get] is lock-free and
-// torn-read-free regardless of how many reloads happen concurrently —
-// every reload installs a fresh `*T` via [atomic.Pointer.Store], so
-// readers always observe a stable, consistent snapshot.
+// torn-read-free: every reload installs a fresh `*T` via
+// [atomic.Pointer.Store], so readers always observe a complete,
+// validated snapshot.
 //
-// Treat the struct returned by Get as IMMUTABLE. Mutating it would
-// race with future readers, defeating the entire point of the atomic-
-// swap design. The intended pattern is "read fields off Get() in a hot
-// path"; for any state that the reader itself mutates, copy out first.
+// Treat the struct returned by Get as IMMUTABLE — mutating it would
+// race with future readers, defeating the atomic-swap design. The
+// intended pattern is "read fields off Get() in a hot path"; for any
+// state the reader itself mutates, copy out first.
 type Live[T any] struct {
 	loader *Loader
 	curr   atomic.Pointer[T]
@@ -26,21 +26,15 @@ type Live[T any] struct {
 	closeOnce sync.Once
 }
 
-// NewLive constructs a [Loader] with the given options and performs an
-// initial Load. If the initial load fails NewLive returns nil and the
-// error; no Live is constructed.
-//
-// On success the returned Live has an active worker goroutine that
-// reloads in response to source-change events (and to manual
-// [Live.Reload] calls); cancel it via [Live.Close].
+// NewLive constructs a [Loader] with the given options and performs
+// an initial Load. Returns nil and the error on first-load failure.
+// On success the returned Live runs a worker goroutine that reloads
+// in response to source-change events and [Live.Reload] calls.
 func NewLive[T any](opts ...Option) (*Live[T], error) {
 	return NewLiveWithLoader[T](New(opts...))
 }
 
-// NewLiveWithLoader is like [NewLive] but uses an existing [*Loader]
-// rather than constructing one from options. Useful when the same
-// loader configuration must drive multiple Live instances or when the
-// loader is built once at program startup.
+// NewLiveWithLoader is like [NewLive] but uses an existing [*Loader].
 func NewLiveWithLoader[T any](l *Loader) (*Live[T], error) {
 	if l == nil {
 		return nil, ErrNilPointer
@@ -93,44 +87,36 @@ func NewLiveWithLoader[T any](l *Loader) (*Live[T], error) {
 	return live, nil
 }
 
-// Get returns the most recently successfully-loaded value. Lock-free
-// and torn-read-free; safe to call from any goroutine. The returned
-// pointer is never nil after a successful [NewLive] / [NewLiveWithLoader].
-//
-// Callers MUST treat the pointed-to struct as immutable; the worker
-// goroutine may install a new pointer at any time, but the old pointer
-// continues to point at a frozen, never-mutated value.
+// Get returns the most recently loaded value. Lock-free, torn-read-
+// free, never nil after [NewLive] succeeds. Callers must treat the
+// pointed-to struct as immutable; the worker may install a new
+// pointer at any time, but every previously-handed-out pointer
+// continues to reference a frozen value.
 func (l *Live[T]) Get() *T {
 	return l.curr.Load()
 }
 
-// Events returns the channel of [Event] values emitted by the worker.
-// One event per reload attempt (success or failure). The channel is
-// closed when [Live.Close] is called.
+// Events returns the channel of [Event] values from the worker — one
+// per reload attempt (success or failure). The channel is closed by
+// [Live.Close].
 //
-// The channel is buffered (capacity 16). If a consumer is too slow to
-// drain, surplus events are dropped — the next Get() still returns the
-// freshest value, so backpressure-induced event loss never hides a
-// successful reload from a hot-path reader.
+// The channel is buffered (capacity 16); a slow consumer drops
+// surplus events. Get() still returns the freshest value, so dropped
+// events never hide a successful reload from a hot-path reader.
 func (l *Live[T]) Events() <-chan Event {
 	return l.eng.events
 }
 
 // Reload triggers a synchronous reload through the worker, bypassing
-// the debounce timer. Returns the reload error (validation failure,
-// immutable-field change, decode error) or nil on success.
-//
-// Useful for sources that don't push change events (no [Watcher]
-// implementation and no [WithPollInterval] configured): callers signal
-// "I have a reason to believe the source changed; please re-read now".
+// the debounce timer. Returns the reload error (validation,
+// immutable, decode) or nil on success.
 func (l *Live[T]) Reload() error {
 	return l.eng.requestReload()
 }
 
 // Close stops the worker, cancels every Watcher subscription, and
-// drains the events channel. Safe to call multiple times; the second
-// call is a no-op. After Close, [Live.Get] continues to return the
-// last-loaded value.
+// closes the events channel. Idempotent. [Live.Get] continues to
+// return the last-loaded value after Close.
 func (l *Live[T]) Close() error {
 	l.closeOnce.Do(func() {
 		l.cancel()

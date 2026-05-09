@@ -9,15 +9,13 @@ import (
 )
 
 // scanner is a single-pass byte-level tokenizer over a `.env` source.
-//
-// It produces logical entries (blank, comment, assignment) in source
-// order, preserving each entry's verbatim raw bytes for round-trip and
-// decoding the assignment value through the appropriate quoting rules.
+// It produces logical entries (blank / comment / assignment) in source
+// order, preserving each entry's raw bytes for round-trip emission.
 type scanner struct {
 	src  []byte
-	pos  int // current byte offset into src
-	line int // 1-based current line (advanced as newlines are consumed)
-	col  int // 1-based current column
+	pos  int
+	line int
+	col  int
 	opts parseOptions
 }
 
@@ -30,13 +28,11 @@ func newScanner(src []byte, opts parseOptions) *scanner {
 	}
 }
 
-// done reports whether the scanner has consumed all input.
 func (s *scanner) done() bool {
 	return s.pos >= len(s.src)
 }
 
-// next returns the byte at the current position without advancing, or
-// 0 when at end of input.
+// peek returns the byte at the current position, or 0 at EOF.
 func (s *scanner) peek() byte {
 	if s.pos >= len(s.src) {
 		return 0
@@ -51,8 +47,6 @@ func (s *scanner) peekAt(offset int) byte {
 	return s.src[s.pos+offset]
 }
 
-// advance moves the scanner past n bytes, updating the line/column
-// counters as it goes.
 func (s *scanner) advance(n int) {
 	for i := 0; i < n && s.pos < len(s.src); i++ {
 		c := s.src[s.pos]
@@ -62,13 +56,9 @@ func (s *scanner) advance(n int) {
 			s.line++
 			s.col = 1
 		case '\r':
-			// CR-only line ending: bump line. CR-LF is handled by the
-			// LF below incrementing line again? No — we need to NOT
-			// double-count. Handle CR specially: if next is LF, it's a
-			// CRLF; the LF advance increments line. So plain CR with no
-			// following LF is a line ending alone.
+			// Don't double-count CRLF: an LF following CR will bump
+			// the line itself on the next iteration.
 			if s.pos < len(s.src) && s.src[s.pos] == '\n' {
-				// CRLF: don't bump on CR; let LF do it on the next iteration.
 				s.col = 1
 			} else {
 				s.line++
@@ -80,7 +70,6 @@ func (s *scanner) advance(n int) {
 	}
 }
 
-// currentPos snapshots the current line/column with the optional file path.
 func (s *scanner) currentPos() env.Position {
 	return env.Position{
 		File:   s.opts.filePath,
@@ -90,8 +79,7 @@ func (s *scanner) currentPos() env.Position {
 	}
 }
 
-// scanFile drains the source into a *File. Returns the first ParseError
-// encountered.
+// scanFile drains src into a *File. Returns the first parse error.
 func scanFile(src []byte, opts parseOptions) (*File, error) {
 	if opts.maxFileSize > 0 && int64(len(src)) > opts.maxFileSize {
 		return nil, fmt.Errorf("size %d > %d: %w", len(src), opts.maxFileSize, ErrFileTooLarge)
@@ -104,10 +92,6 @@ func scanFile(src []byte, opts parseOptions) (*File, error) {
 	for !s.done() {
 		startPos := s.currentPos()
 		startOff := s.pos
-
-		// Track the physical line's length to enforce maxLineLength.
-		// A multi-line double-quoted value resets line counting at
-		// each LF so each physical line is bounded independently.
 		entry, err := s.scanLogicalEntry()
 		if err != nil {
 			return nil, err
@@ -127,31 +111,23 @@ func stripUTF8BOM(b []byte) []byte {
 	return b
 }
 
-// scanLogicalEntry reads one logical entry (blank, comment, or
-// assignment) from the current position. The scanner is positioned
-// immediately after the entry's terminating line ending on return.
+// scanLogicalEntry reads one logical entry from the current position.
+// On return the scanner is positioned past the terminating line ending.
 func (s *scanner) scanLogicalEntry() (Entry, error) {
-	// Track length of the leading physical line for enforcement.
 	physStart := s.pos
 
-	// Skip leading whitespace (spaces and tabs).
-	wsStart := s.pos
 	for !s.done() && (s.peek() == ' ' || s.peek() == '\t') {
 		s.advance(1)
 	}
-	leadingWS := s.src[wsStart:s.pos]
 
-	// Blank line: only whitespace before the line ending.
 	if s.done() || isLineEnding(s.peek()) {
 		s.consumeLineEnding()
 		if err := s.checkLineLength(physStart); err != nil {
 			return Entry{}, err
 		}
-		_ = leadingWS
 		return Entry{Kind: EntryBlank}, nil
 	}
 
-	// Comment line.
 	if s.peek() == '#' {
 		for !s.done() && !isLineEnding(s.peek()) {
 			s.advance(1)
@@ -163,27 +139,22 @@ func (s *scanner) scanLogicalEntry() (Entry, error) {
 		return Entry{Kind: EntryComment}, nil
 	}
 
-	// Assignment.
 	return s.scanAssignment(physStart)
 }
 
-// scanAssignment parses one KEY[=:]VALUE line.
 func (s *scanner) scanAssignment(physStart int) (Entry, error) {
 	startPos := s.currentPos()
 
-	// Optional leading "export " (Bash-style).
 	if hasExportPrefix(s.src[s.pos:]) {
 		if s.opts.strictDotenv {
 			return Entry{}, &ParseError{Pos: startPos, Message: "export prefix not allowed in strict mode"}
 		}
 		s.advance(len("export "))
-		// Skip any extra whitespace after `export `.
 		for !s.done() && (s.peek() == ' ' || s.peek() == '\t') {
 			s.advance(1)
 		}
 	}
 
-	// Identifier.
 	keyStart := s.pos
 	if !isIdentifierStart(s.peek(), s.opts.relaxedNames) {
 		return Entry{}, &ParseError{Pos: s.currentPos(), Message: fmt.Sprintf("invalid identifier start byte %q", s.peek())}
@@ -194,12 +165,10 @@ func (s *scanner) scanAssignment(physStart int) (Entry, error) {
 	}
 	key := string(s.src[keyStart:s.pos])
 
-	// Whitespace before separator.
 	for !s.done() && (s.peek() == ' ' || s.peek() == '\t') {
 		s.advance(1)
 	}
 
-	// Separator: '=' (canonical) or ':' (YAML-style; rejected in strict mode).
 	if s.done() {
 		return Entry{}, &ParseError{Pos: s.currentPos(), Message: "expected '=' or ':' after key"}
 	}
@@ -215,19 +184,15 @@ func (s *scanner) scanAssignment(physStart int) (Entry, error) {
 		return Entry{}, &ParseError{Pos: s.currentPos(), Message: fmt.Sprintf("expected '=' or ':' after key, got %q", s.peek())}
 	}
 
-	// Whitespace before value.
 	for !s.done() && (s.peek() == ' ' || s.peek() == '\t') {
 		s.advance(1)
 	}
 
-	// Value.
 	value, quote, err := s.scanValue()
 	if err != nil {
 		return Entry{}, err
 	}
 
-	// Trailing whitespace and optional `# comment` are consumed by
-	// scanValue's caller. Then the line ending.
 	if err := s.consumeTrailingAndLineEnding(); err != nil {
 		return Entry{}, err
 	}
@@ -244,16 +209,13 @@ func (s *scanner) scanAssignment(physStart int) (Entry, error) {
 	}, nil
 }
 
-// scanValue reads the value part of an assignment, dispatching by quote
-// kind. On return the scanner is positioned after the value's last byte
-// (or after the closing quote for quoted forms), but BEFORE any trailing
-// whitespace, trailing comment, or line ending.
-//
-// Returns the decoded value, the source quoting form (0/`"`/`'`/“ ` “),
-// and any parse error.
+// scanValue reads an assignment's value, dispatching by quote kind.
+// On return the scanner is positioned after the value (or its closing
+// quote) but before any trailing whitespace / comment / line ending.
+// Returns the decoded value, the quote form (0, '"', '\”, '`'), and
+// any parse error.
 func (s *scanner) scanValue() (string, byte, error) {
 	if s.done() || isLineEnding(s.peek()) {
-		// Empty value: KEY=  (or KEY= EOL).
 		return "", 0, nil
 	}
 	switch s.peek() {
@@ -274,26 +236,20 @@ func (s *scanner) scanValue() (string, byte, error) {
 	}
 }
 
-// scanUnquoted reads an unquoted value: from current position to either
-// end-of-line or the start of a `# comment`. Trailing whitespace is
-// trimmed from the returned value.
-//
-// A `#` introduces a comment ONLY when preceded by whitespace; `foo#bar`
-// is a single value, not a value followed by a comment.
+// scanUnquoted reads up to end-of-line or the start of a `# comment`,
+// trimming trailing whitespace. `#` only introduces a comment when
+// preceded by whitespace, so `foo#bar` is one value.
 func (s *scanner) scanUnquoted() string {
 	start := s.pos
 	for !s.done() && !isLineEnding(s.peek()) {
 		c := s.peek()
 		if c == '#' {
-			// Hash starts a trailing comment only if it's separated from
-			// the value by whitespace. Look back at the previous byte.
 			if s.pos > start {
 				prev := s.src[s.pos-1]
 				if prev == ' ' || prev == '\t' {
 					break
 				}
 			} else {
-				// `#` immediately after the separator; treat as comment.
 				break
 			}
 		}
@@ -303,12 +259,11 @@ func (s *scanner) scanUnquoted() string {
 	return strings.TrimRight(raw, " \t")
 }
 
-// scanSingleQuoted reads a single-quoted value: every byte except `'`
-// is literal. No escape sequences. Multi-line allowed (literal newlines
-// preserved).
+// scanSingleQuoted reads a single-quoted value: bytes are literal, no
+// escapes, multi-line allowed.
 func (s *scanner) scanSingleQuoted() (string, error) {
 	openPos := s.currentPos()
-	s.advance(1) // consume opening quote
+	s.advance(1)
 	start := s.pos
 	for !s.done() && s.peek() != '\'' {
 		s.advance(1)
@@ -317,16 +272,15 @@ func (s *scanner) scanSingleQuoted() (string, error) {
 		return "", &ParseError{Pos: openPos, Message: "unterminated single-quoted value"}
 	}
 	value := string(s.src[start:s.pos])
-	s.advance(1) // consume closing quote
+	s.advance(1)
 	return value, nil
 }
 
-// scanBacktickQuoted reads a backtick-quoted value: identical to single-
-// quoted (no expansion, no escapes). Only callable when [WithBackticks]
-// is enabled.
+// scanBacktickQuoted is the backtick equivalent of [scanSingleQuoted];
+// only reachable under [WithBackticks].
 func (s *scanner) scanBacktickQuoted() (string, error) {
 	openPos := s.currentPos()
-	s.advance(1) // consume opening quote
+	s.advance(1)
 	start := s.pos
 	for !s.done() && s.peek() != '`' {
 		s.advance(1)
@@ -335,16 +289,18 @@ func (s *scanner) scanBacktickQuoted() (string, error) {
 		return "", &ParseError{Pos: openPos, Message: "unterminated backtick-quoted value"}
 	}
 	value := string(s.src[start:s.pos])
-	s.advance(1) // consume closing quote
+	s.advance(1)
 	return value, nil
 }
 
-// scanDoubleQuoted reads a double-quoted value with the standard escape
-// table. Multi-line values are permitted; literal newlines inside the
-// quotes appear in the decoded value verbatim.
+// scanDoubleQuoted reads a double-quoted value with the standard
+// escape table. Literal newlines are permitted inside the quotes.
+// `\<LF>` / `\<CRLF>` is line continuation; `\$` is preserved via
+// [dollarSuppressSentinel] when expansion is enabled. Unknown escapes
+// pass through as `\X` (matching motdotla's tolerant behavior).
 func (s *scanner) scanDoubleQuoted() (string, error) {
 	openPos := s.currentPos()
-	s.advance(1) // consume opening quote
+	s.advance(1)
 	var buf strings.Builder
 	for !s.done() && s.peek() != '"' {
 		c := s.peek()
@@ -373,20 +329,14 @@ func (s *scanner) scanDoubleQuoted() (string, error) {
 				buf.WriteByte('\\')
 				s.advance(2)
 			case '$':
-				// When expansion will run, emit a sentinel so the
-				// post-pass expander knows this `$` came from `\$`
-				// and must not trigger expansion. When expansion is
-				// off, just emit a literal `$` directly.
 				if s.opts.expand {
 					buf.WriteByte(dollarSuppressSentinel)
 				}
 				buf.WriteByte('$')
 				s.advance(2)
 			case '\n':
-				// Line continuation: consume \\<LF>, emit nothing.
 				s.advance(2)
 			case '\r':
-				// `\<CR>` or `\<CRLF>` — line continuation.
 				s.advance(2)
 				if !s.done() && s.peek() == '\n' {
 					s.advance(1)
@@ -394,29 +344,25 @@ func (s *scanner) scanDoubleQuoted() (string, error) {
 			case 0:
 				return "", &ParseError{Pos: s.currentPos(), Message: "unterminated escape sequence"}
 			default:
-				// Unknown escape: keep the backslash and the next byte
-				// verbatim. This matches motdotla/dotenv's tolerant
-				// behavior. godotenv would reject; we accept by default.
 				buf.WriteByte('\\')
 				buf.WriteByte(next)
 				s.advance(2)
 			}
 			continue
 		}
-		// Literal byte (including LF / CR for multi-line strings).
 		buf.WriteByte(c)
 		s.advance(1)
 	}
 	if s.done() {
 		return "", &ParseError{Pos: openPos, Message: "unterminated double-quoted value"}
 	}
-	s.advance(1) // consume closing quote
+	s.advance(1)
 	return buf.String(), nil
 }
 
-// consumeTrailingAndLineEnding skips whitespace + an optional `# comment`
-// + the line ending after a value. Errors if any non-whitespace, non-`#`
-// byte appears between the value and the end-of-line.
+// consumeTrailingAndLineEnding skips whitespace + optional `# comment`
+// + the line ending after a value. Errors when a non-whitespace,
+// non-`#` byte appears between the value and end-of-line.
 func (s *scanner) consumeTrailingAndLineEnding() error {
 	for !s.done() && (s.peek() == ' ' || s.peek() == '\t') {
 		s.advance(1)
@@ -441,7 +387,7 @@ func (s *scanner) consumeTrailingAndLineEnding() error {
 	}
 }
 
-// consumeLineEnding reads one line ending: LF, CRLF, or bare CR.
+// consumeLineEnding reads one line ending (LF, CRLF, or bare CR).
 func (s *scanner) consumeLineEnding() {
 	if s.done() {
 		return
@@ -457,11 +403,9 @@ func (s *scanner) consumeLineEnding() {
 	}
 }
 
-// checkLineLength enforces WithMaxLineLength against the physical line
-// starting at physStart and ending at the current position. Multi-line
-// double-quoted values that span multiple physical lines aren't measured
-// in aggregate; this function is called once per logical entry and uses
-// the entry's leading physical line as the bound.
+// checkLineLength enforces [WithMaxLineLength] against the physical
+// line starting at physStart. Multi-line values aren't measured in
+// aggregate; the leading physical line is the bound.
 func (s *scanner) checkLineLength(physStart int) error {
 	if s.opts.maxLineLength <= 0 {
 		return nil
@@ -473,8 +417,8 @@ func (s *scanner) checkLineLength(physStart int) error {
 	return nil
 }
 
-// hasExportPrefix reports whether b begins with "export " followed by an
-// identifier-start byte.
+// hasExportPrefix reports whether b begins with "export " followed by
+// an identifier-start byte.
 func hasExportPrefix(b []byte) bool {
 	const prefix = "export "
 	if !bytes.HasPrefix(b, []byte(prefix)) {
@@ -491,11 +435,9 @@ func isLineEnding(c byte) bool {
 	return c == '\n' || c == '\r'
 }
 
-// isIdentifierStart reports whether c can begin a POSIX identifier.
-// With relaxed=true, additional characters (`-`, `.`, ASCII digit) are
-// permitted — note that even relaxed names cannot START with a digit
-// to avoid confusion with shell scripting that interprets numeric
-// prefixes as integer literals.
+// isIdentifierStart reports whether c may begin a POSIX identifier.
+// With relaxed=true, non-ASCII bytes are also accepted; even in
+// relaxed mode an identifier cannot start with a digit.
 func isIdentifierStart(c byte, relaxed bool) bool {
 	switch {
 	case c >= 'A' && c <= 'Z':
@@ -506,14 +448,14 @@ func isIdentifierStart(c byte, relaxed bool) bool {
 		return true
 	}
 	if relaxed && c >= 0x80 {
-		return true // non-ASCII byte
+		return true
 	}
 	return false
 }
 
-// isIdentifierByte reports whether c can appear inside a POSIX identifier
-// after the first byte. With relaxed=true, hyphens, dots, and non-ASCII
-// bytes are also permitted.
+// isIdentifierByte reports whether c may appear after the first byte
+// of an identifier. relaxed=true also permits hyphens, dots, and
+// non-ASCII bytes.
 func isIdentifierByte(c byte, relaxed bool) bool {
 	switch {
 	case c >= 'A' && c <= 'Z':

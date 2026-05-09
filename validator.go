@@ -1,20 +1,12 @@
 package env
 
-// Validator is implemented by struct types that need cross-field validation
-// after loading. It is detected via interface assertion on the target's
-// pointer-receiver type.
-//
-// The loader calls Validate once after every field has been populated and
-// after every per-field error has been aggregated. If field-level errors
-// exist, Validate is NOT called (the struct is in a partial state and
-// running Validate against it would produce noise that's likely to
-// confuse rather than help).
-//
-// On a successful load (no field errors), a non-nil Validate return is
-// wrapped in a [*ValidationError] and added to the [*MultiError].
-//
-// Cross-field rules go here; per-field rules go in the field's tag
-// (required, notEmpty, default=) or in a custom decoder.
+// Validator is implemented by struct types that need cross-field
+// validation after loading. The loader detects it via interface
+// assertion on the target's pointer receiver and calls Validate once,
+// after every field has been populated. If per-field errors exist
+// Validate is skipped, since the struct is in a partial state. A
+// non-nil return is wrapped in a [*ValidationError] and added to the
+// [*MultiError].
 //
 //	type Config struct {
 //	    DBHost string `env:"DB_HOST"`
