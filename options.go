@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
+	"time"
 )
 
 // Option configures a [Loader]. Apply via [New] or via [LoadTo].
@@ -23,6 +24,8 @@ type loaderOptions struct {
 	mutators       []Mutator
 	secretRedactor func(string) string
 	withoutUnset   bool
+	pollInterval   time.Duration
+	reloadDebounce time.Duration
 }
 
 // customDecoderFn is the dispatcher signature for decoders registered via
@@ -37,8 +40,16 @@ func defaultLoaderOptions() loaderOptions {
 		tagName:        "env",
 		fieldNameXform: toScreamingSnake,
 		secretRedactor: defaultSecretRedactor,
+		reloadDebounce: DefaultReloadDebounce,
 	}
 }
+
+// DefaultReloadDebounce is the quiet period [Loader.Watch] and [Live]
+// wait after the last [Source]-change event before performing a reload.
+// 75ms covers every common burst pattern (an editor save sequence
+// produces fsnotify events for write/chmod/close in quick succession)
+// without feeling laggy in interactive use.
+const DefaultReloadDebounce = 75 * time.Millisecond
 
 // defaultSecretRedactor renders a length-revealing marker for secret
 // values that surface in error messages or [Describe] output.
@@ -199,6 +210,40 @@ func WithSecretRedactor(fn func(value string) string) Option {
 func WithoutUnset() Option {
 	return func(o *loaderOptions) {
 		o.withoutUnset = true
+	}
+}
+
+// WithPollInterval configures how often [Loader.Watch] and [Live]
+// re-read sources that do NOT implement [Watcher]. Default 0, which
+// means non-Watcher sources are read once at the initial load and
+// never re-read; pass a positive duration to enable poll-based reload
+// for those sources. Watcher-implementing sources push events
+// regardless of this setting.
+//
+// Negative durations are clamped to zero (polling disabled).
+func WithPollInterval(d time.Duration) Option {
+	return func(o *loaderOptions) {
+		if d < 0 {
+			d = 0
+		}
+		o.pollInterval = d
+	}
+}
+
+// WithReloadDebounce coalesces burst events from [Watcher]-implementing
+// sources. The watcher waits for `d` of quiet after the last incoming
+// change event before re-running the load pipeline; multiple events
+// within `d` collapse into one reload. Default
+// [DefaultReloadDebounce] (75ms).
+//
+// Negative durations are clamped to zero (no debouncing — every change
+// event triggers an immediate reload, intended for tests only).
+func WithReloadDebounce(d time.Duration) Option {
+	return func(o *loaderOptions) {
+		if d < 0 {
+			d = 0
+		}
+		o.reloadDebounce = d
 	}
 }
 
