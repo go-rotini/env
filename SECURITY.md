@@ -10,11 +10,11 @@ You should receive a response within 72 hours. If accepted, a fix will be develo
 
 This package defaults to safe behavior to mitigate denial-of-service and accidental misuse:
 
-- **`.env` parser DoS guards**: configurable via `WithMaxFileSize`, `WithMaxLineLength`, and `WithMaxExpansionDepth`. Defaults are conservative (10 MiB file size, 1 MiB line length, expansion depth 16).
-- **Variable-expansion cycles** are detected and rejected with `ErrCycle` rather than overflowing the stack.
-- **`fromFile` reads** are bounded by `WithFromFileMaxSize` (default 1 MiB) so a path pointed at `/dev/zero` cannot exhaust memory.
-- **No subshell execution.** The package never invokes `$(command)` or any shell substitution form, regardless of dialect.
+- **Variable-expansion cycles** in `expand`-tagged values are detected and rejected with `ErrCycle` rather than overflowing the stack.
+- **`fromFile` reads** read the named file's contents into the field. Only fields you explicitly tag `fromFile` are eligible; keep the path under your control (don't derive it from untrusted input, e.g. pointed at `/dev/zero`).
+- **No subshell execution.** The package never invokes `$(command)` or any shell substitution form.
 - **No `os.Setenv` from inside the library** (with the single exception of the `unset` tag option, which is opt-in per field). All "writes" operate on in-memory `Source` chains or `*atomic.Pointer[T]` snapshots so the package never collides with libc `setenv`/`getenv` thread-safety on cgo paths.
+- **`.env` parsing** is not part of this package — it lives in [go-rotini/dotenv](https://github.com/go-rotini/dotenv), which has its own DoS guards (max file size, max line length, expansion depth, cycle detection). See that package's `SECURITY.md`.
 
 ## Secret Handling
 

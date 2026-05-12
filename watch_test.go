@@ -14,7 +14,8 @@ import (
 
 // pushSource is a tiny test [env.Source] + [env.Watcher] that lets a
 // test mutate values and trigger Change events on demand. Models the
-// behavior of dotenv/watcher and any other push-based source the
+// behavior of a file-watching live source (e.g. one built on the
+// github.com/go-rotini/fs watcher) and any other push-based source the
 // loader integrates with.
 type pushSource struct {
 	mu     sync.Mutex

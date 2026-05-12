@@ -1,6 +1,0 @@
-{
-  "result": {
-    "PRIVATE_KEY": "-----BEGIN PRIVATE KEY-----\nLine two\nLine three\n-----END PRIVATE KEY-----"
-  },
-  "error": null
-}

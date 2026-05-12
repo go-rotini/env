@@ -1,5 +1,5 @@
-// Package env loads environment variables (and optional .env files) into
-// Go structs, with first-class support for live reload.
+// Package env loads environment variables into Go structs, with
+// first-class support for live reload.
 //
 // The mental model is [encoding/json]: a struct gets populated from a set of
 // named values via tags, with extension points for custom types, sources, and
@@ -24,8 +24,9 @@
 // # Sources
 //
 // All lookups go through the [Source] interface. The OS environment is just
-// one source; .env files (via the env/dotenv sub-package), in-memory maps,
-// and remote secret backends (in their own modules) are equal citizens.
+// one source; `.env` files (via the separate github.com/go-rotini/dotenv
+// package), in-memory maps ([Map]), source chains ([Multi]), and remote
+// secret backends (in their own modules) are equal citizens.
 //
 //	loader := env.New(
 //	    env.WithSource(env.OSEnv()),
@@ -45,15 +46,19 @@
 //
 //	cfg := live.Get()  // *Config — never nil after NewLive succeeds
 //
-// # Sub-packages
+// # Related packages
 //
-//   - env/dotenv          — .env file parser, AST, lossless round-trip, [Lint]
-//   - env/dotenv/watcher  — fsnotify-backed file watching with atomic-rename support
-//   - env/envtest         — Snapshot/Restore helpers for tests that mutate os.Environ
+// This package has no third-party runtime dependencies and no sub-packages.
+// Adjacent functionality lives in its own module so consumers pay only for
+// what they import:
 //
-// The root package has no third-party runtime dependencies. Sub-packages add
-// dependencies (fsnotify in env/dotenv/watcher) only when their features are
-// imported.
+//   - github.com/go-rotini/dotenv — `.env` file parser, AST, lossless
+//     round-trip, Lint; surfaces a parsed file as a [Source]. Also has no
+//     third-party dependencies.
+//   - github.com/go-rotini/fs — filesystem helpers including a
+//     content-agnostic file watcher (atomic-rename aware, debounced). A
+//     higher-level package composes it with dotenv (and the yaml/toml/jsonc
+//     parsers) to drive live reload of config files through [NewLive].
 //
 // # Tag system
 //
@@ -89,27 +94,16 @@
 //     leading-`=` per-drive variables). [OSEnv] filters them; you don't see
 //     them via [Source.Lookup].
 //
-// Dotenv parsing:
-//
-//   - CRLF / bare CR line endings are normalized; the parser produces the
-//     same AST regardless of which line ending the file used.
-//   - UTF-8 BOM at offset 0 is stripped; a BOM elsewhere is treated as a
-//     literal character.
-//   - Comments inside quoted values are part of the value; the cheap
-//     "split on #" approach is wrong. Trailing whitespace is trimmed for
-//     unquoted values, preserved for quoted.
-//   - The `export ` prefix is stripped only when followed by whitespace and
-//     a valid identifier. `exportFOO=bar` is a bare assignment.
-//   - YAML-style `KEY: value` and backtick-quoted values are dialect
-//     extensions; reject them with [WithStrictDotenv] or accept them with
-//     the relevant opt-in.
-//
 // Live reload:
 //
-//   - Editor "atomic save" patterns (write-temp-then-rename) break naive
-//     fsnotify watches because the new inode is a different file. The
-//     env/dotenv/watcher sub-package watches the parent directory and
-//     filters by filename — the only correct strategy.
+//   - Reload is driven by any [Source] that also implements [Watcher].
+//     Sources that don't are polled at the interval set by
+//     [WithPollInterval], or read once and never re-read if that option is
+//     absent. The github.com/go-rotini/fs watcher (used by the higher-level
+//     `.env` / yaml / toml / jsonc live-source package) handles editor
+//     "atomic save" patterns (write-temp-then-rename) by watching the parent
+//     directory and filtering by filename — the only correct strategy, since
+//     the rewritten file is a new inode.
 //   - The reload pipeline parses + validates into a fresh candidate before
 //     swapping; failures retain the previous value and emit an error
 //     event. The struct returned by [Live.Get] is therefore always a
@@ -142,13 +136,14 @@
 //     redact to "***" by default; [WithEncodeIncludeSecrets] opts in.
 //     Encode + Load is byte-stable for canonical inputs but is not a
 //     round-trip for `.env` FILES (comments and original quoting are lost).
-//     For lossless `.env` editing, use dotenv.Parse → [(*File).Set] →
-//     [(*File).Marshal].
+//     For lossless `.env` editing, use github.com/go-rotini/dotenv's Parse →
+//     (*File).Set → (*File).Marshal.
 //
 // Architecture:
 //
-//   - The root package has zero third-party runtime dependencies. `.env`
-//     parsing lives in env/dotenv (no third-party deps either); fsnotify-
-//     backed watching lives in env/dotenv/watcher. Consumers who only need
-//     OSEnv + Map pay no transitive cost. Verified by `go list -deps`.
+//   - This package has zero third-party runtime dependencies and no
+//     sub-packages. `.env` parsing is in github.com/go-rotini/dotenv (also
+//     dependency-free); file watching is in github.com/go-rotini/fs.
+//     Consumers who only need OSEnv + Map pay no transitive cost. Verified
+//     by `go list -deps`.
 package env

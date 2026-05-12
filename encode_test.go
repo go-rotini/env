@@ -889,7 +889,7 @@ func TestEncode_RoundTrip_QuotedValues(t *testing.T) {
 // parseEncodedToMap is a minimal parser exercising the encoder's
 // output shape: bare values, double-quoted values with the standard
 // escape table, comments, and `export ` prefixes. The full parser
-// lives in env/dotenv.
+// lives in github.com/go-rotini/dotenv.
 func parseEncodedToMap(t *testing.T, src string) map[string]string {
 	t.Helper()
 	out := make(map[string]string)

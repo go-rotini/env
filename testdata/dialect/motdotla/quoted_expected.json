@@ -1,8 +1,0 @@
-{
-  "result": {
-    "SINGLE":    "retain $literal",
-    "DOUBLE":    "escapes\nwork",
-    "NO_EXPAND": "$NOT_DEFINED"
-  },
-  "error": null
-}

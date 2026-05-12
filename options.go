@@ -125,10 +125,10 @@ func WithFieldNameTransform(fn func(goFieldName string) string) Option {
 	}
 }
 
-// WithRelaxedNames accepts identifiers containing characters outside
-// the POSIX [A-Za-z_][A-Za-z0-9_]* class (hyphens, dots, non-ASCII).
-// Default is POSIX-strict. The dotenv parser consults this option for
-// its own identifier validation; OSEnv defers to the OS.
+// WithRelaxedNames accepts `env:"NAME"` tag identifiers containing
+// characters outside the POSIX [A-Za-z_][A-Za-z0-9_]* class (hyphens,
+// dots, non-ASCII). Default is POSIX-strict; [OSEnv] defers to the OS
+// for which names exist.
 func WithRelaxedNames() Option {
 	return func(o *loaderOptions) {
 		o.relaxedNames = true

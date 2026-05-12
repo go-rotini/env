@@ -1,5 +1,5 @@
 .PHONY: all clean lint test test-acceptance test-bench \
-        test-conformance test-fuzz test-mutation test-race
+        test-fuzz test-mutation test-race
 
 all: clean lint test test-acceptance test-bench test-fuzz test-mutation test-race
 
@@ -26,17 +26,9 @@ test-acceptance:
 test-bench:
 	@go test -bench=. -benchmem -count=1 ./... | tee test_bench.out
 
-test-conformance:
-	@go test -v -count=1 -run 'TestDialectCompat|TestDotenvCorpus' -coverprofile=test_conformance.out ./...
-	@go tool cover -func=test_conformance.out | tail -1
-
 test-fuzz:
 	@go test -fuzz=FuzzLoader -fuzztime=60s -run=^$$ .
 	@go test -fuzz=FuzzDecode -fuzztime=60s -run=^$$ .
-	@go test -fuzz=FuzzScanner -fuzztime=60s -run=^$$ ./dotenv
-	@go test -fuzz=FuzzParser -fuzztime=60s -run=^$$ ./dotenv
-	@go test -fuzz=FuzzExpand -fuzztime=60s -run=^$$ ./dotenv
-	@go test -fuzz=FuzzRoundTrip -fuzztime=60s -run=^$$ ./dotenv
 
 test-mutation:
 	@go tool github.com/go-gremlins/gremlins/cmd/gremlins unleash --config .gremlins.yaml

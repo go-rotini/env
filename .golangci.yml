@@ -231,43 +231,6 @@ linters:
           - funlen
           - nestif
 
-      # dotenv sub-package internals
-      - path: dotenv/scanner\.go
-        linters:
-          - cyclop
-          - gocognit
-          - gocyclo
-          - funlen
-          - maintidx
-          - nestif
-          - unparam
-
-      - path: dotenv/parser\.go
-        linters:
-          - cyclop
-          - gocognit
-          - gocyclo
-          - funlen
-          - maintidx
-          - nestif
-          - nilnil
-
-      - path: dotenv/expand\.go
-        linters:
-          - cyclop
-          - gocognit
-          - gocyclo
-          - funlen
-          - nestif
-
-      - path: dotenv/marshal\.go
-        linters:
-          - cyclop
-          - gocognit
-          - gocyclo
-          - funlen
-          - nestif
-
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0

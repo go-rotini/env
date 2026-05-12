@@ -1,6 +1,6 @@
 # go-rotini/env
 
-A Go environment-variable loader that treats env vars the way `encoding/json` treats JSON: a struct gets populated via tags, with first-class support for live reload, multiple sources, and `.env` files.
+A Go environment-variable loader that treats env vars the way `encoding/json` treats JSON: a struct gets populated via tags, with first-class support for live reload and pluggable sources — OS environment, in-memory maps, ordered chains, and `.env` files (via the separate [go-rotini/dotenv](https://github.com/go-rotini/dotenv) package).
 
 This package is used as the default environment-variable support package for [rotini](https://github.com/go-rotini/rotini).
 
@@ -8,20 +8,18 @@ This package is used as the default environment-variable support package for [ro
 
 - One-line happy path: `env.Load(&cfg)` is enough for most programs
 - `encoding/json`-shaped API: single comma-separated `env:"NAME,opt1,opt2"` tag, generic `LoadTo[T]` convenience, `Encoder`-style `Loader` for advanced cases
-- Aggregated multi-error reporting with source-and-line attribution for `.env` parse failures
-- Principled `Source` interface: `OSEnv()`, `Map`, `Multi(...)` in the root, `.env` parsing in `env/dotenv`, fsnotify-backed watching in `env/dotenv/watcher`
+- Aggregated multi-error reporting with source-and-line attribution
+- Principled `Source` interface: `OSEnv()`, `Map`, `Multi(...)` built in; `.env` parsing via [go-rotini/dotenv](https://github.com/go-rotini/dotenv); remote secret backends in their own modules — all equal citizens
 - Atomic, lock-free reads on reload via `Live[T]` and `sync/atomic.Pointer`
 - Per-field `immutable` enforcement: reload candidates that change a marked field are rejected
 - Secret-redacting output (`String()`, `Describe`, `PrintUsage`, `Markdown`, `Encode`) plus a `Secret[T]` wrapper integrating with `slog.LogValuer`
-- Variable expansion: `$VAR`, `${VAR}`, `${VAR:-default}`, `${VAR:?error}` (opt-in)
+- Variable expansion on tagged values: `$VAR`, `${VAR}`, `${VAR:-default}`, `${VAR:?error}` (opt-in via the `expand` tag option)
 - Built-in support for `time.Duration`, `time.Time`, `*time.Location`, `url.URL`, `net.IP`, `*net.IPNet`, `regexp.Regexp`, `[]byte` (raw, base64, hex), plus `encoding.TextUnmarshaler` and `encoding.BinaryUnmarshaler` interop
 - Mutator chain for value rewriting (resolving `secret://` indirections, fetching from a vault) and observation (logging, metrics)
 - `Validate() error` lifecycle hook for cross-field rules
 - Auto-generated help text (`PrintUsage`) and Markdown documentation (`Markdown`) from a tagged struct
-- Lossless round-trip for `.env` editing through the `dotenv.File` AST
 - Reverse direction: `Encode` / `EncodeFile` write a struct out as `KEY=VALUE` lines suitable for child-process env or `.env.dist` files
-- DoS guards on the `.env` parser: max file size, max line length, expansion depth, cycle detection
-- Zero non-stdlib dependencies in the root; fsnotify isolated to `env/dotenv/watcher`
+- Zero non-stdlib runtime dependencies; no sub-packages
 
 ## Installation
 
@@ -71,12 +69,13 @@ func main() {
 
 ## Loading from a `.env` file
 
-The `env/dotenv` sub-package parses `.env` files into an `env.Source`:
+`.env` parsing lives in the separate [`github.com/go-rotini/dotenv`](https://github.com/go-rotini/dotenv)
+package, which surfaces a parsed file as an `env.Source`:
 
 ```go
 import (
 	"github.com/go-rotini/env"
-	"github.com/go-rotini/env/dotenv"
+	"github.com/go-rotini/dotenv"
 )
 
 src, err := dotenv.NewSource(".env", dotenv.WithExpand())
@@ -96,19 +95,12 @@ if err := loader.Load(&cfg); err != nil {
 
 `Live[T]` wraps the loader in an `atomic.Pointer[T]`-backed handle. Reads are
 O(1) and lock-free; readers always observe a complete, validated snapshot.
-Pair it with the fsnotify-backed watcher for automatic reload on file edits:
+Reload is driven by any `Source` that also implements `env.Watcher`; sources
+that don't are polled at the interval set by `WithPollInterval`, or read once
+and never re-read if that option is absent.
 
 ```go
-import (
-	"github.com/go-rotini/env"
-	"github.com/go-rotini/env/dotenv/watcher"
-)
-
-watch, err := watcher.New(".env")
-if err != nil { log.Fatal(err) }
-defer watch.Close()
-
-live, err := env.NewLive[Config](env.WithSource(env.OSEnv(), watch))
+live, err := env.NewLive[Config](env.WithSource(env.OSEnv(), changingSrc))
 if err != nil { log.Fatal(err) }
 defer live.Close()
 
@@ -132,9 +124,13 @@ go func() {
 }()
 ```
 
-The watcher debounces fsnotify burst events (default 75ms) and handles the
-"editor atomic save" pattern (write-temp-then-rename) by watching the parent
-directory and filtering by filename.
+For automatic reload on `.env` (or yaml/toml/jsonc) file edits, use a live
+source built on [`github.com/go-rotini/fs`](https://github.com/go-rotini/fs)'s
+file watcher — it debounces editor save bursts and handles the "atomic save"
+pattern (write-temp-then-rename) by watching the parent directory and filtering
+by filename. The reload pipeline parses + validates a fresh candidate before
+swapping; a failed candidate retains the previous value and emits an error
+event.
 
 ## Auto-generated documentation
 
@@ -166,8 +162,9 @@ cmd.Env = strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
 ```
 
 For lossless `.env` editing (preserving comments and original quoting), use
-`dotenv.Parse` → `(*File).Set` → `(*File).Marshal` instead — `Encode` is a
-struct-to-text path and does not preserve formatting.
+[`github.com/go-rotini/dotenv`](https://github.com/go-rotini/dotenv)'s `Parse` →
+`(*File).Set` → `(*File).Marshal` instead — `Encode` is a struct-to-text path
+and does not preserve formatting.
 
 ## Multiple sources and precedence
 
@@ -178,13 +175,15 @@ told otherwise" — list `OSEnv()` first:
 ```go
 loader := env.New(env.WithSource(
 	env.OSEnv(),                                    // wins by default
-	mustDotenv(".env.local"),                       // dev overrides
-	mustDotenv(".env"),                             // baseline
+	mustDotenv(".env.local"),                       // dev overrides   (dotenv.NewSource)
+	mustDotenv(".env"),                             // baseline        (dotenv.NewSource)
 ))
 ```
 
-`WithSourceAppend` and `WithSourcePrepend` adjust an existing chain without
-replacing it.
+(`mustDotenv` here is a thin wrapper around
+[`github.com/go-rotini/dotenv`](https://github.com/go-rotini/dotenv)'s
+`NewSource` that panics on error.) `WithSourceAppend` and `WithSourcePrepend`
+adjust an existing chain without replacing it.
 
 ## Validation
 

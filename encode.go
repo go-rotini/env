@@ -90,8 +90,8 @@ func WithCustomMarshaler[T any](fn func(T) (string, error)) EncodeOption {
 // and nil slice/map fields are omitted.
 //
 // v may be a struct value or a non-nil pointer to one. Output is
-// sourceable by Bash (with [WithEncodeExport]) and re-parseable through
-// this package's `env/dotenv` parser.
+// sourceable by Bash (with [WithEncodeExport]) and re-parseable by the
+// github.com/go-rotini/dotenv parser.
 func Encode(w io.Writer, v any, opts ...EncodeOption) error {
 	if v == nil {
 		return ErrNilPointer
@@ -417,7 +417,7 @@ func needsQuoting(s string) bool {
 }
 
 // quoteValue double-quotes s with the standard escape table applied.
-// The result is parseable by this package and by joho/godotenv.
+// The result is parseable by github.com/go-rotini/dotenv and by joho/godotenv.
 func quoteValue(s string) string {
 	var b strings.Builder
 	b.Grow(len(s) + 2)

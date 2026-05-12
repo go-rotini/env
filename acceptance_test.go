@@ -1,25 +1,21 @@
 package env_test
 
 import (
-	"path/filepath"
 	"testing"
 
 	"github.com/go-rotini/env"
-	"github.com/go-rotini/env/dotenv"
 )
 
-// Loader-level acceptance tests. Each test composes a `dotenv` source
-// for a real-world `.env` fixture and runs the loader through the
-// full pipeline (field collection → source lookup → decoding) against
-// a struct shaped like the fixture's data. This catches regressions in
-// the LOADER's interaction with dotenv that the dotenv-internal tests
-// in [dotenv/acceptance_test.go] would not.
+// Loader-level acceptance tests. Each test feeds the loader a [env.Map]
+// source shaped like a real-world configuration set (the same key/value
+// data a `.env` file from the named tool would produce) and runs the
+// full pipeline (field collection → source lookup → decoding) against a
+// struct shaped like that data. This exercises the LOADER end-to-end
+// without depending on any particular source implementation; `.env`
+// parsing itself is covered by github.com/go-rotini/dotenv's own
+// acceptance suite.
 
-func acceptanceEnvPath(name string) string {
-	return filepath.Join("testdata", "acceptance", name+".env")
-}
-
-// --- kubectl: load into a typed config struct. ---
+// --- kubectl-style config: load into a typed config struct. ---
 
 func TestAcceptance_KubectlLoadsIntoStruct(t *testing.T) {
 	t.Parallel()
@@ -31,10 +27,13 @@ func TestAcceptance_KubectlLoadsIntoStruct(t *testing.T) {
 		FeatureFlags []string `env:"FEATURE_FLAGS"`
 	}
 
-	src, err := dotenv.NewSource(acceptanceEnvPath("kubectl"))
-	if err != nil {
-		t.Fatalf("NewSource: %v", err)
-	}
+	src := env.Map(map[string]string{
+		"DATABASE_HOST": "postgres.svc.cluster.local",
+		"DATABASE_PORT": "5432",
+		"DATABASE_NAME": "app",
+		"APP_LOG_LEVEL": "info",
+		"FEATURE_FLAGS": "feature-a,feature-b",
+	})
 	loader := env.New(env.WithSource(src))
 
 	var cfg kubectlCfg
@@ -71,10 +70,14 @@ func TestAcceptance_GHALoadsIntoStruct(t *testing.T) {
 		RunnerTemp string `env:"RUNNER_TEMP"`
 	}
 
-	src, err := dotenv.NewSource(acceptanceEnvPath("gha"))
-	if err != nil {
-		t.Fatalf("NewSource: %v", err)
-	}
+	src := env.Map(map[string]string{
+		"GITHUB_ACTIONS":    "true",
+		"GITHUB_REPOSITORY": "acme/widget",
+		"GITHUB_REF":        "refs/heads/main",
+		"GITHUB_SHA":        "0123456789abcdef0123456789abcdef01234567",
+		"RUNNER_OS":         "Linux",
+		"RUNNER_TEMP":       "/home/runner/work/_temp",
+	})
 	loader := env.New(env.WithSource(src))
 
 	var cfg ghaCfg
@@ -92,7 +95,7 @@ func TestAcceptance_GHALoadsIntoStruct(t *testing.T) {
 	}
 }
 
-// --- Compose .env: project + image tag. ---
+// --- Compose-style config: project + image tag. ---
 
 func TestAcceptance_ComposeLoadsIntoStruct(t *testing.T) {
 	t.Parallel()
@@ -102,10 +105,12 @@ func TestAcceptance_ComposeLoadsIntoStruct(t *testing.T) {
 		WebPort int    `env:"WEB_PORT"`
 	}
 
-	src, err := dotenv.NewSource(acceptanceEnvPath("compose"))
-	if err != nil {
-		t.Fatalf("NewSource: %v", err)
-	}
+	src := env.Map(map[string]string{
+		"COMPOSE_PROJECT_NAME": "acme",
+		"TAG":                  "v1.4.0",
+		"DB_PASSWORD":          "changeme",
+		"WEB_PORT":             "8080",
+	})
 	loader := env.New(env.WithSource(src))
 
 	var cfg composeCfg
@@ -117,7 +122,7 @@ func TestAcceptance_ComposeLoadsIntoStruct(t *testing.T) {
 	}
 }
 
-// --- Rails: `export ` prefix transparently accepted. ---
+// --- Rails-style config. ---
 
 func TestAcceptance_RailsLoadsIntoStruct(t *testing.T) {
 	t.Parallel()
@@ -128,10 +133,12 @@ func TestAcceptance_RailsLoadsIntoStruct(t *testing.T) {
 		SecretKeyBase string `env:"SECRET_KEY_BASE,required,secret"`
 	}
 
-	src, err := dotenv.NewSource(acceptanceEnvPath("rails"))
-	if err != nil {
-		t.Fatalf("NewSource: %v", err)
-	}
+	src := env.Map(map[string]string{
+		"RAILS_ENV":       "development",
+		"DATABASE_URL":    "postgres://localhost/myapp_development",
+		"REDIS_URL":       "redis://localhost:6379/0",
+		"SECRET_KEY_BASE": "09f86d1f0ad2c5b71f6f58cae7b3b9c8",
+	})
 	loader := env.New(env.WithSource(src))
 
 	var cfg railsCfg
@@ -149,7 +156,7 @@ func TestAcceptance_RailsLoadsIntoStruct(t *testing.T) {
 	}
 }
 
-// --- Laravel: APP_KEY with base64 prefix, set-but-empty DB_PASSWORD. ---
+// --- Laravel-style config: APP_KEY with base64 prefix, set-but-empty DB_PASSWORD. ---
 
 func TestAcceptance_LaravelLoadsIntoStruct(t *testing.T) {
 	t.Parallel()
@@ -167,10 +174,21 @@ func TestAcceptance_LaravelLoadsIntoStruct(t *testing.T) {
 		DBPassword string `env:"DB_PASSWORD"`
 	}
 
-	src, err := dotenv.NewSource(acceptanceEnvPath("laravel"))
-	if err != nil {
-		t.Fatalf("NewSource: %v", err)
-	}
+	src := env.Map(map[string]string{
+		"APP_NAME":      "Laravel",
+		"APP_ENV":       "local",
+		"APP_KEY":       "base64:b1jK2f5h+y0E9aDnM2gVkF8gJ3c3mY4cTx3R3F6nQGw=",
+		"APP_DEBUG":     "true",
+		"APP_URL":       "http://localhost",
+		"LOG_CHANNEL":   "stack",
+		"LOG_LEVEL":     "debug",
+		"DB_CONNECTION": "mysql",
+		"DB_HOST":       "127.0.0.1",
+		"DB_PORT":       "3306",
+		"DB_DATABASE":   "laravel",
+		"DB_USERNAME":   "root",
+		"DB_PASSWORD":   "", // set-but-empty
+	})
 	loader := env.New(env.WithSource(src))
 
 	var cfg laravelCfg
@@ -183,24 +201,21 @@ func TestAcceptance_LaravelLoadsIntoStruct(t *testing.T) {
 	if cfg.DBPort != 3306 {
 		t.Errorf("DBPort = %d", cfg.DBPort)
 	}
-	// Set-but-empty: DB_PASSWORD= is present in the file. The loader
-	// receives ok=true with value "" from the source and decodes
+	// Set-but-empty: DB_PASSWORD is present with an empty value. The
+	// loader receives ok=true with value "" from the source and decodes
 	// into the empty string (no notEmpty constraint).
 	if cfg.DBPassword != "" {
 		t.Errorf("DBPassword = %q, want empty", cfg.DBPassword)
 	}
 }
 
-// --- Loader composes dotenv source with OSEnv: OSEnv wins. ---
+// --- Loader composes a file-shaped source under OSEnv: OSEnv wins. ---
 
-func TestAcceptance_OSEnvBeatsDotEnvFile(t *testing.T) {
+func TestAcceptance_OSEnvBeatsLowerPrioritySource(t *testing.T) {
 	t.Setenv("APP_DEBUG", "false")
 
-	src, err := dotenv.NewSource(acceptanceEnvPath("laravel"))
-	if err != nil {
-		t.Fatalf("NewSource: %v", err)
-	}
-	loader := env.New(env.WithSource(env.OSEnv(), src))
+	fileLike := env.Map(map[string]string{"APP_DEBUG": "true"})
+	loader := env.New(env.WithSource(env.OSEnv(), fileLike))
 
 	type cfg struct {
 		AppDebug bool `env:"APP_DEBUG"`
@@ -210,6 +225,6 @@ func TestAcceptance_OSEnvBeatsDotEnvFile(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	if got.AppDebug {
-		t.Errorf("AppDebug = true, want false (OSEnv override should beat dotenv source)")
+		t.Errorf("AppDebug = true, want false (OSEnv override should beat the lower-priority source)")
 	}
 }

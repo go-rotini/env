@@ -28,9 +28,8 @@ make lint
 
 ```bash
 make test              # run tests
-make test-acceptance   # run real-world env / .env file acceptance tests
+make test-acceptance   # run loader acceptance tests against real-world config shapes
 make test-bench        # run benchmarks
-make test-conformance  # run dotenv dialect compatibility tests (Ruby, Node, Compose, Foreman)
 make test-fuzz         # run fuzz tests (60s per fuzzer)
 make test-mutation     # run mutation tests
 make test-race         # run tests with race detector
@@ -44,7 +43,7 @@ make test-race         # run tests with race detector
 
 ## Reporting Bugs
 
-Open an issue with a minimal reproducing struct, env-var inputs (or `.env` file content), and the expected vs. actual behavior.
+Open an issue with a minimal reproducing struct, the env-var inputs, and the expected vs. actual behavior. (For `.env` parsing issues, file against [go-rotini/dotenv](https://github.com/go-rotini/dotenv) instead.)
 
 ## Security
 

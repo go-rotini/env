@@ -13,9 +13,10 @@ body:
   - type: textarea
     id: env-input
     attributes:
-      label: Environment Variables / `.env` Input
+      label: Environment Variables / Source Inputs
       description: |
-        Env-var values, or `.env` file contents, that trigger the bug.
+        The env-var values (or other Source contents) that trigger the bug.
+        For `.env` parsing bugs, file against go-rotini/dotenv instead.
         Redact any secrets — replace with `<redacted>` and note the type.
       render: shell
 
