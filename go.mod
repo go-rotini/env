@@ -2,7 +2,7 @@ module github.com/go-rotini/env
 
 go 1.26
 
-toolchain go1.26.2
+toolchain go1.26.3
 
 tool (
 	github.com/go-gremlins/gremlins/cmd/gremlins

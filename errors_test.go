@@ -255,13 +255,18 @@ func TestFormatError_Multi(t *testing.T) {
 	}
 }
 
-func TestFormatError_Color(t *testing.T) {
-	got := FormatError(errors.New("boom"), true)
+func TestFormatErrorColor(t *testing.T) {
+	got := FormatErrorColor(errors.New("boom"))
 	if !strings.Contains(got, "\x1b[1;31m") || !strings.Contains(got, "\x1b[0m") {
 		t.Errorf("color output missing ANSI sequences: %q", got)
 	}
-	got = FormatError(errors.New("boom"), false)
-	if strings.Contains(got, "\x1b[") {
+	if !strings.Contains(got, "boom") {
+		t.Errorf("color output missing message: %q", got)
+	}
+	if got := FormatErrorColor(nil); got != "" {
+		t.Errorf("FormatErrorColor(nil) = %q, want empty", got)
+	}
+	if got := FormatError(errors.New("boom")); strings.Contains(got, "\x1b[") {
 		t.Errorf("non-color output contains ANSI: %q", got)
 	}
 }

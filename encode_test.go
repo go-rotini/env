@@ -825,6 +825,149 @@ func TestEncodeFile_TruncatesExisting(t *testing.T) {
 	}
 }
 
+// --- loader-aware Encode / EncodeFile ---
+
+func TestLoader_Encode_HonorsPrefix(t *testing.T) {
+	type cfg struct {
+		Port int    `env:"PORT,default=8080"`
+		Name string `env:"NAME"`
+	}
+	l := New(WithPrefix("APP_"))
+	var buf bytes.Buffer
+	if err := l.Encode(&buf, cfg{Port: 9000, Name: "svc"}); err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	if want := "APP_PORT=9000\nAPP_NAME=svc\n"; buf.String() != want {
+		t.Errorf("got %q, want %q", buf.String(), want)
+	}
+	// Package-level Encode has no prefix.
+	pkg := encodeToString(t, cfg{Port: 9000, Name: "svc"})
+	if strings.Contains(pkg, "APP_") {
+		t.Errorf("package-level Encode added a prefix: %q", pkg)
+	}
+}
+
+func TestLoader_Encode_HonorsTagName(t *testing.T) {
+	type cfg struct {
+		Port int `cfg:"DB_PORT"`
+	}
+	l := New(WithTagName("cfg"))
+	var buf bytes.Buffer
+	if err := l.Encode(&buf, cfg{Port: 5432}); err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	if want := "DB_PORT=5432\n"; buf.String() != want {
+		t.Errorf("got %q, want %q", buf.String(), want)
+	}
+	// Package-level Encode reads the "env" tag, so the cfg tag is invisible
+	// and the key falls back to the SCREAMING_SNAKE_CASE field name.
+	if pkg := encodeToString(t, cfg{Port: 5432}); !strings.Contains(pkg, "PORT=5432") || strings.Contains(pkg, "DB_PORT") {
+		t.Errorf("package-level Encode should use the field name, got %q", pkg)
+	}
+}
+
+func TestLoader_Encode_HonorsFieldNameTransform(t *testing.T) {
+	type cfg struct {
+		Port int    // untagged → key comes from the transform
+		Name string // untagged
+	}
+	l := New(WithFieldNameTransform(func(s string) string { return "X_" + strings.ToUpper(s) }))
+	var buf bytes.Buffer
+	if err := l.Encode(&buf, cfg{Port: 1, Name: "n"}); err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	if want := "X_PORT=1\nX_NAME=n\n"; buf.String() != want {
+		t.Errorf("got %q, want %q", buf.String(), want)
+	}
+}
+
+func TestLoader_Encode_CommentsKeyedByPrefixedName(t *testing.T) {
+	type cfg struct {
+		Port int `env:"PORT"`
+	}
+	l := New(WithPrefix("APP_"))
+	out := func(comments map[string]string) string {
+		var buf bytes.Buffer
+		if err := l.Encode(&buf, cfg{Port: 1}, WithEncodeComments(comments)); err != nil {
+			t.Fatalf("Encode: %v", err)
+		}
+		return buf.String()
+	}
+	if got := out(map[string]string{"APP_PORT": "the port"}); !strings.Contains(got, "# the port\n") {
+		t.Errorf("comment keyed by prefixed name not applied: %q", got)
+	}
+	if got := out(map[string]string{"PORT": "unprefixed"}); strings.Contains(got, "unprefixed") {
+		t.Errorf("comment keyed by unprefixed name should not match: %q", got)
+	}
+}
+
+func TestLoader_Encode_RoundTripsThroughLoad(t *testing.T) {
+	type cfg struct {
+		Port  int    `env:"PORT"`
+		Token string `env:"TOKEN,secret"`
+	}
+	l := New(WithPrefix("SVC_"))
+	original := cfg{Port: 7000, Token: "hunter2"}
+	var buf bytes.Buffer
+	if err := l.Encode(&buf, original, WithEncodeIncludeSecrets(true)); err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	parsed := parseEncodedToMap(t, buf.String())
+	back := New(WithPrefix("SVC_"), WithSource(Map(parsed)))
+	var got cfg
+	if err := back.Load(&got); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got != original {
+		t.Errorf("round-trip mismatch: got %+v, want %+v", got, original)
+	}
+}
+
+func TestLoader_EncodeFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "out.env")
+	type cfg struct {
+		Port int `env:"PORT"`
+	}
+	l := New(WithPrefix("APP_"))
+	if err := l.EncodeFile(path, cfg{Port: 9000}); err != nil {
+		t.Fatalf("EncodeFile: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "APP_PORT=9000") {
+		t.Errorf("file content: %q", data)
+	}
+	if info, err := os.Stat(path); err != nil {
+		t.Fatal(err)
+	} else if mode := info.Mode().Perm(); mode != 0o600 {
+		t.Errorf("mode = %o, want 0600", mode)
+	}
+}
+
+func TestLoader_Encode_NotStruct(t *testing.T) {
+	var buf bytes.Buffer
+	if err := New().Encode(&buf, 42); !errors.Is(err, ErrNotStruct) {
+		t.Errorf("err = %v, want ErrNotStruct", err)
+	}
+	if err := New().EncodeFile(filepath.Join(t.TempDir(), "x"), nil); !errors.Is(err, ErrNilPointer) {
+		t.Errorf("err = %v, want ErrNilPointer", err)
+	}
+}
+
+func TestLoader_Encode_StructInfoError(t *testing.T) {
+	type cfg struct {
+		A string `cfg:"FOO"`
+		B string `cfg:"FOO"` // conflict
+	}
+	var buf bytes.Buffer
+	if err := New(WithTagName("cfg")).Encode(&buf, cfg{}); !errors.Is(err, ErrConflictingFields) {
+		t.Errorf("err = %v, want ErrConflictingFields", err)
+	}
+}
+
 // --- round-trip stability ---
 
 type roundTripConfig struct {

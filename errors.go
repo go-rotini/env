@@ -266,14 +266,23 @@ var (
 )
 
 // FormatError renders err into a human-readable string. For
-// [*MultiError], each wrapped error is rendered on its own line. Pass
-// color=true to wrap each message in ANSI bold-red. Returns "" when
-// err is nil.
-func FormatError(err error, color ...bool) string {
+// [*MultiError], each wrapped error is rendered on its own line.
+// Returns "" when err is nil. See [FormatErrorColor] for an
+// ANSI-colored variant.
+func FormatError(err error) string {
+	return formatError(err, false)
+}
+
+// FormatErrorColor is like [FormatError] but wraps each message in
+// ANSI bold-red. Use it only when the destination is a terminal.
+func FormatErrorColor(err error) string {
+	return formatError(err, true)
+}
+
+func formatError(err error, useColor bool) string {
 	if err == nil {
 		return ""
 	}
-	useColor := len(color) > 0 && color[0]
 	var multi *MultiError
 	if errors.As(err, &multi) && multi != nil && len(multi.Errors) > 0 {
 		var b strings.Builder

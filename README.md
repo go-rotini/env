@@ -163,6 +163,12 @@ _ = env.Encode(buf, &cfg, env.WithEncodeIncludeSecrets(true))
 cmd.Env = strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
 ```
 
+The package-level `Encode` / `EncodeFile` use the defaults (`env` tag,
+SCREAMING_SNAKE_CASE, no prefix). If you built the loader with `WithTagName`,
+`WithFieldNameTransform`, or `WithPrefix`, use the loader methods
+`loader.Encode` / `loader.EncodeFile` so the output round-trips through
+`loader.Load`.
+
 For lossless `.env` editing (preserving comments and original quoting), use
 [`github.com/go-rotini/dotenv`](https://github.com/go-rotini/dotenv)'s `Parse` →
 `(*File).Set` → `(*File).Marshal` instead — `Encode` is a struct-to-text path

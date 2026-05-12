@@ -92,41 +92,85 @@ func WithCustomMarshaler[T any](fn func(T) (string, error)) EncodeOption {
 // v may be a struct value or a non-nil pointer to one. Output is
 // sourceable by Bash (with [WithEncodeExport]) and re-parseable by the
 // github.com/go-rotini/dotenv parser.
+//
+// Encode uses the default field-name mapping (SCREAMING_SNAKE_CASE), the
+// default tag name ("env"), and no key prefix. For a loader built with
+// [WithTagName], [WithFieldNameTransform], or [WithPrefix], use
+// [Loader.Encode] so the output round-trips through that loader.
 func Encode(w io.Writer, v any, opts ...EncodeOption) error {
+	rv, err := encodableValue(v)
+	if err != nil {
+		return err
+	}
+	info := getStructInfo(rv.Type())
+	if info.Err != nil {
+		return info.Err
+	}
+	return encodeStruct(w, rv, info, "", opts)
+}
+
+// Encode is the loader-aware counterpart of [Encode]: it honors this
+// loader's [WithTagName], [WithFieldNameTransform], and [WithPrefix], so
+// the result round-trips through this loader's [Loader.Load].
+// Source-, mutator-, validator-, and [WithoutUnset]-related options play
+// no part in encoding.
+func (l *Loader) Encode(w io.Writer, v any, opts ...EncodeOption) error {
+	rv, err := encodableValue(v)
+	if err != nil {
+		return err
+	}
+	info, err := l.structInfo(rv.Type())
+	if err != nil {
+		return err
+	}
+	return encodeStruct(w, rv, info, l.opts.prefix, opts)
+}
+
+// EncodeFile encodes v to path with mode 0600 (owner-only — these
+// files often hold secrets). Existing files are truncated.
+func EncodeFile(path string, v any, opts ...EncodeOption) error {
+	return encodeToFile(path, func(w io.Writer) error { return Encode(w, v, opts...) })
+}
+
+// EncodeFile is the loader-aware counterpart of [EncodeFile]; see
+// [Loader.Encode].
+func (l *Loader) EncodeFile(path string, v any, opts ...EncodeOption) error {
+	return encodeToFile(path, func(w io.Writer) error { return l.Encode(w, v, opts...) })
+}
+
+// encodableValue validates v and returns an addressable struct value.
+// Marshaler interface checks frequently require pointer receivers, so
+// non-addressable inputs are copied into fresh storage.
+func encodableValue(v any) (reflect.Value, error) {
 	if v == nil {
-		return ErrNilPointer
+		return reflect.Value{}, ErrNilPointer
 	}
 	rv := reflect.ValueOf(v)
 	for rv.Kind() == reflect.Pointer {
 		if rv.IsNil() {
-			return fmt.Errorf("got %T: %w", v, ErrNilPointer)
+			return reflect.Value{}, fmt.Errorf("got %T: %w", v, ErrNilPointer)
 		}
 		rv = rv.Elem()
 	}
 	if rv.Kind() != reflect.Struct {
-		return fmt.Errorf("got %T: %w", v, ErrNotStruct)
+		return reflect.Value{}, fmt.Errorf("got %T: %w", v, ErrNotStruct)
 	}
-
-	// Marshaler interface checks frequently require pointer receivers,
-	// so addressable storage is required.
 	if !rv.CanAddr() {
 		holder := reflect.New(rv.Type())
 		holder.Elem().Set(rv)
 		rv = holder.Elem()
 	}
+	return rv, nil
+}
 
-	info := getStructInfo(rv.Type())
-	if info.Err != nil {
-		return info.Err
-	}
-
+func encodeStruct(w io.Writer, rv reflect.Value, info *structInfo, prefix string, opts []EncodeOption) error {
 	o := defaultEncodeOptions()
 	for _, opt := range opts {
 		opt(&o)
 	}
 
 	bw := bufio.NewWriter(w)
-	enc := &encoder{w: bw, opts: o}
+	enc := &encoder{w: bw, opts: o, prefix: prefix}
 
 	fields := info.Fields
 	if o.sortKeys {
@@ -147,15 +191,13 @@ func Encode(w io.Writer, v any, opts ...EncodeOption) error {
 	return nil
 }
 
-// EncodeFile encodes v to path with mode 0600 (owner-only — these
-// files often hold secrets). Existing files are truncated.
-func EncodeFile(path string, v any, opts ...EncodeOption) error {
+func encodeToFile(path string, write func(io.Writer) error) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("env: open %s: %w", path, err)
 	}
 	defer func() { _ = f.Close() }()
-	if err := Encode(f, v, opts...); err != nil {
+	if err := write(f); err != nil {
 		return err
 	}
 	if err := f.Close(); err != nil {
@@ -165,8 +207,9 @@ func EncodeFile(path string, v any, opts ...EncodeOption) error {
 }
 
 type encoder struct {
-	w    *bufio.Writer
-	opts encoderOptions
+	w      *bufio.Writer
+	opts   encoderOptions
+	prefix string
 }
 
 func (e *encoder) encodeField(root reflect.Value, fd fieldDescriptor) error {
@@ -204,8 +247,10 @@ func (e *encoder) encodeField(root reflect.Value, fd fieldDescriptor) error {
 		}
 	}
 
+	key := e.prefix + fd.Key
+
 	desc := fd.Description
-	if d, ok := e.opts.comments[fd.Key]; ok {
+	if d, ok := e.opts.comments[key]; ok {
 		desc = d
 	}
 	if desc != "" {
@@ -221,7 +266,7 @@ func (e *encoder) encodeField(root reflect.Value, fd fieldDescriptor) error {
 			return err
 		}
 	}
-	if _, err := e.w.WriteString(fd.Key); err != nil {
+	if _, err := e.w.WriteString(key); err != nil {
 		return err
 	}
 	if err := e.w.WriteByte('='); err != nil {

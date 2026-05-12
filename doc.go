@@ -74,9 +74,14 @@
 // base64, hex, unset. (`expand` performs `$VAR` / `${VAR}` / `${VAR-default}`
 // / `${VAR:-default}` / `${VAR:?message}` substitution on the resolved value,
 // resolving names verbatim against the source chain; unset references expand
-// to "". `${VAR:?msg}` for an unset VAR fails with [ErrExpansionAssertion].)
-// Companion tags: envDesc:"..." for free-text help and envPrefix:"PFX_" on
-// nested struct fields. See the package README for the full table.
+// to "". `${VAR:?msg}` for an unset VAR fails with [ErrExpansionAssertion].
+// As with [os.Expand]/POSIX shells, inside `${...}` a `-` (or `:-`, `:?`)
+// starts the operator section, so a variable whose name contains `-` cannot
+// be referenced with the `${...}` form — use a name without `-`, or `$NAME`
+// only if no `-` follows. `WithPrefix` is NOT applied to expansion
+// references.) Companion tags: envDesc:"..." for free-text help and
+// envPrefix:"PFX_" on nested struct fields. See the package README for the
+// full table.
 //
 // # Pitfalls
 //
@@ -120,7 +125,9 @@
 //     stable view; mutating it through the returned pointer is a race.
 //   - Fields tagged `immutable` reject reload candidates that would change
 //     them. Initial load is exempt; subsequent reloads compare against the
-//     last successful snapshot.
+//     last successful snapshot. For a field that is also `expand`-tagged the
+//     comparison uses the post-expansion value, so a change in a referenced
+//     variable counts even when the field's own `${...}` template is unchanged.
 //
 // Concurrency:
 //
