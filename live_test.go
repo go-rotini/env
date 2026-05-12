@@ -216,6 +216,41 @@ func TestLive_ImmutableSecretRedacted(t *testing.T) {
 	}
 }
 
+// TestLive_ImmutableExpandChangeRejected proves an `immutable,expand`
+// field is compared on its post-expansion value: a change in a
+// referenced variable counts as a change even though the field's own
+// raw value (the "${HOST}/db" template) never moves.
+func TestLive_ImmutableExpandChangeRejected(t *testing.T) {
+	t.Parallel()
+	src := newPushSource(map[string]string{"HOST": "h1", "DSN": "${HOST}/db"})
+	type cfg struct {
+		DSN string `env:"DSN,immutable,expand"`
+	}
+	live, err := env.NewLive[cfg](env.WithSource(src), env.WithReloadDebounce(20*time.Millisecond))
+	if err != nil {
+		t.Fatalf("NewLive: %v", err)
+	}
+	t.Cleanup(func() { _ = live.Close() })
+
+	if live.Get().DSN != "h1/db" {
+		t.Fatalf("initial DSN = %q, want h1/db", live.Get().DSN)
+	}
+	old := live.Get()
+
+	src.set("HOST", "h2") // DSN's template is unchanged, but it now expands to h2/db.
+	ev := awaitEvent(t, live.Events(), "after referenced-var change")
+	var ice *env.ImmutableChangedError
+	if !errors.As(ev.Err, &ice) {
+		t.Fatalf("ev.Err = %v, want *ImmutableChangedError", ev.Err)
+	}
+	if ice.Old != "h1/db" || ice.New != "h2/db" {
+		t.Errorf("ImmutableChangedError Old/New = %q/%q, want h1/db/h2/db", ice.Old, ice.New)
+	}
+	if live.Get() != old {
+		t.Error("Live installed a new pointer despite immutable rejection")
+	}
+}
+
 // --- manual Reload ---
 
 func TestLive_ReloadIsSynchronous(t *testing.T) {

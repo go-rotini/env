@@ -1,6 +1,7 @@
 package env
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"reflect"
@@ -72,9 +73,10 @@ func (s Secret[T]) MarshalEnv() (string, error) {
 }
 
 // UnmarshalEnv implements [Unmarshaler] by delegating to the package's
-// decoder against the inner T.
+// decoder against the inner T. If T relies on [UnmarshalerContext], it
+// receives context.Background() (the wrapper has no context to thread).
 func (s *Secret[T]) UnmarshalEnv(text string) error {
-	return decodeValue(reflect.ValueOf(&s.v).Elem(), text, decodeOpts{})
+	return decodeValue(context.Background(), reflect.ValueOf(&s.v).Elem(), text, decodeOpts{})
 }
 
 // secretMarker is intentionally distinct from the encoder's "***" so

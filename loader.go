@@ -192,7 +192,9 @@ func (l *Loader) composedSource() Source {
 //  5. Variable expansion (`expand` tag).
 //  6. notEmpty check.
 //  7. fromFile substitution (read file contents as the value).
-//  8. Decode: custom decoder, then [UnmarshalerContext], then the value decoder.
+//  8. Decode: custom decoder, then the value decoder (which checks, in
+//     order, [UnmarshalerContext], [Unmarshaler], [encoding.TextUnmarshaler],
+//     [encoding.BinaryUnmarshaler], built-in specials, then reflection).
 //  9. unset (call os.Unsetenv unless [WithoutUnset]).
 func (l *Loader) populateField(ctx context.Context, root reflect.Value, fd fieldDescriptor, src Source, multi *MultiError) {
 	resolvedKey := l.opts.prefix + fd.Key
@@ -275,16 +277,7 @@ func (l *Loader) populateField(ctx context.Context, root reflect.Value, fd field
 		return
 	}
 
-	if uc, ok := field.Addr().Interface().(UnmarshalerContext); ok {
-		if err := uc.UnmarshalEnv(ctx, rawValue); err != nil {
-			multi.Append(l.annotateParseError(wrapDecodeErr(field.Type(), rawValue, err), fd, resolvedKey, rawValue, field.Type()))
-			return
-		}
-		l.maybeUnset(fd, resolvedKey)
-		return
-	}
-
-	if err := decodeValue(field, rawValue, decodeOptsFromDescriptor(fd)); err != nil {
+	if err := decodeValue(ctx, field, rawValue, decodeOptsFromDescriptor(fd)); err != nil {
 		multi.Append(l.annotateParseError(err, fd, resolvedKey, rawValue, field.Type()))
 		return
 	}

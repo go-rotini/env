@@ -20,7 +20,7 @@ func decodeInto[T any](t *testing.T, text string, opts decodeOpts) (T, error) {
 	t.Helper()
 	var zero T
 	holder := reflect.New(reflect.TypeFor[T]())
-	err := decodeValue(holder.Elem(), text, opts)
+	err := decodeValue(context.Background(), holder.Elem(), text, opts)
 	if err != nil {
 		return zero, err
 	}
@@ -811,7 +811,7 @@ func TestDecode_PriorityChain_TimeLayoutOverridesInterface(t *testing.T) {
 func TestDecode_Unsupported_Chan(t *testing.T) {
 	var c chan int
 	v := reflect.ValueOf(&c).Elem()
-	err := decodeValue(v, "anything", decodeOpts{})
+	err := decodeValue(context.Background(), v, "anything", decodeOpts{})
 	if !errors.Is(err, ErrUnsupportedType) {
 		t.Errorf("err = %v, want ErrUnsupportedType", err)
 	}
@@ -820,7 +820,7 @@ func TestDecode_Unsupported_Chan(t *testing.T) {
 func TestDecode_Unsupported_Func(t *testing.T) {
 	var f func()
 	v := reflect.ValueOf(&f).Elem()
-	err := decodeValue(v, "x", decodeOpts{})
+	err := decodeValue(context.Background(), v, "x", decodeOpts{})
 	if !errors.Is(err, ErrUnsupportedType) {
 		t.Errorf("err = %v, want ErrUnsupportedType", err)
 	}
@@ -829,7 +829,7 @@ func TestDecode_Unsupported_Func(t *testing.T) {
 func TestDecode_Unsupported_Complex(t *testing.T) {
 	var c complex64
 	v := reflect.ValueOf(&c).Elem()
-	err := decodeValue(v, "1+2i", decodeOpts{})
+	err := decodeValue(context.Background(), v, "1+2i", decodeOpts{})
 	if !errors.Is(err, ErrUnsupportedType) {
 		t.Errorf("err = %v, want ErrUnsupportedType", err)
 	}
@@ -838,7 +838,7 @@ func TestDecode_Unsupported_Complex(t *testing.T) {
 func TestDecode_Unsupported_Interface(t *testing.T) {
 	var x any
 	v := reflect.ValueOf(&x).Elem()
-	err := decodeValue(v, "x", decodeOpts{})
+	err := decodeValue(context.Background(), v, "x", decodeOpts{})
 	if !errors.Is(err, ErrUnsupportedType) {
 		t.Errorf("err = %v, want ErrUnsupportedType", err)
 	}
@@ -850,28 +850,50 @@ func TestDecode_Unsupported_StructWithoutInterface(t *testing.T) {
 	type noUnmarshalers struct{ X int }
 	var s noUnmarshalers
 	v := reflect.ValueOf(&s).Elem()
-	err := decodeValue(v, "x", decodeOpts{})
+	err := decodeValue(context.Background(), v, "x", decodeOpts{})
 	if !errors.Is(err, ErrUnsupportedType) {
 		t.Errorf("err = %v, want ErrUnsupportedType", err)
 	}
 }
 
-// --- context interface (not invoked by the value-decoder layer) ---
+// --- UnmarshalerContext ---
 
-type ctxUnmarshaler struct{ got string }
+type ctxUnmarshaler struct {
+	got    string
+	sawCtx bool
+}
 
-func (c *ctxUnmarshaler) UnmarshalEnv(_ context.Context, s string) error {
+type ctxKey struct{}
+
+func (c *ctxUnmarshaler) UnmarshalEnv(ctx context.Context, s string) error {
 	c.got = s
+	if v, _ := ctx.Value(ctxKey{}).(string); v == "marker" {
+		c.sawCtx = true
+	}
 	return nil
 }
 
-func TestDecode_UnmarshalerContext_DecoderLevelFallsThrough(t *testing.T) {
-	// UnmarshalerContext is consulted by the loader (which has a context),
-	// not by the context-free value decoder; a type implementing only
-	// UnmarshalerContext is unsupported at the decoder level. The
-	// loader-level wiring is exercised by TestLoad_UnmarshalerContext.
-	if _, err := decodeInto[ctxUnmarshaler](t, "x", decodeOpts{}); !errors.Is(err, ErrUnsupportedType) {
-		t.Errorf("err = %v, want ErrUnsupportedType", err)
+func TestDecode_UnmarshalerContext(t *testing.T) {
+	// The value decoder consults UnmarshalerContext (ahead of Unmarshaler),
+	// passing the context — including for *T fields, where the pointer is
+	// auto-allocated first.
+	got, err := decodeInto[ctxUnmarshaler](t, "x", decodeOpts{})
+	if err != nil {
+		t.Fatalf("decodeInto: %v", err)
+	}
+	if got.got != "x" {
+		t.Errorf("UnmarshalEnv(ctx, s) not invoked: got %q", got.got)
+	}
+
+	// *T field: the pointer is allocated, then UnmarshalerContext on *T is reached.
+	holder := reflect.New(reflect.TypeFor[*ctxUnmarshaler]())
+	ctx := context.WithValue(context.Background(), ctxKey{}, "marker")
+	if err := decodeValue(ctx, holder.Elem(), "y", decodeOpts{}); err != nil {
+		t.Fatalf("decodeValue(*ctxUnmarshaler): %v", err)
+	}
+	p, _ := holder.Elem().Interface().(*ctxUnmarshaler)
+	if p == nil || p.got != "y" || !p.sawCtx {
+		t.Errorf("*T UnmarshalerContext: p=%+v", p)
 	}
 }
 

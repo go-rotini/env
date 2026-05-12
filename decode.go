@@ -1,6 +1,7 @@
 package env
 
 import (
+	"context"
 	"encoding"
 	"encoding/base64"
 	"encoding/hex"
@@ -49,18 +50,21 @@ var (
 )
 
 // decodeValue decodes text into dst, which must be settable and
-// addressable. Priority chain (high to low):
+// addressable. ctx is forwarded to an [UnmarshalerContext] if dst (or
+// its pointee, after auto-init) implements one. Priority chain (high to
+// low):
 //
 //  1. Pointer auto-init: nil pointers are allocated; empty text on a
 //     pointer leaves the pointee at its zero value.
 //  2. Tag-option overrides (time.Time + layout=, []byte + base64=/hex=).
-//  3. [Unmarshaler] (UnmarshalEnv).
-//  4. [encoding.TextUnmarshaler] (UnmarshalText).
-//  5. [encoding.BinaryUnmarshaler] (UnmarshalBinary).
-//  6. Built-in specials (time.Duration, time.Location, net.IPNet) and
+//  3. [UnmarshalerContext] (UnmarshalEnv(ctx, s)).
+//  4. [Unmarshaler] (UnmarshalEnv(s)).
+//  5. [encoding.TextUnmarshaler] (UnmarshalText).
+//  6. [encoding.BinaryUnmarshaler] (UnmarshalBinary).
+//  7. Built-in specials (time.Duration, time.Location, net.IPNet) and
 //     []byte/[N]byte default raw form.
-//  7. Default reflection (primitives, slices, arrays, maps).
-func decodeValue(dst reflect.Value, text string, opts decodeOpts) error {
+//  8. Default reflection (primitives, slices, arrays, maps).
+func decodeValue(ctx context.Context, dst reflect.Value, text string, opts decodeOpts) error {
 	for dst.Kind() == reflect.Pointer {
 		if dst.IsNil() {
 			dst.Set(reflect.New(dst.Type().Elem()))
@@ -79,6 +83,12 @@ func decodeValue(dst reflect.Value, text string, opts decodeOpts) error {
 	}
 
 	addr := dst.Addr()
+	if uc, ok := addr.Interface().(UnmarshalerContext); ok {
+		if err := uc.UnmarshalEnv(ctx, text); err != nil {
+			return wrapDecodeErr(dst.Type(), text, err)
+		}
+		return nil
+	}
 	if u, ok := addr.Interface().(Unmarshaler); ok {
 		if err := u.UnmarshalEnv(text); err != nil {
 			return wrapDecodeErr(dst.Type(), text, err)
@@ -102,7 +112,7 @@ func decodeValue(dst reflect.Value, text string, opts decodeOpts) error {
 		return err
 	}
 
-	return decodeReflect(dst, text, opts)
+	return decodeReflect(ctx, dst, text, opts)
 }
 
 // decodeBuiltinSpecial handles types the interface chain doesn't reach
@@ -140,8 +150,9 @@ func decodeBuiltinSpecial(dst reflect.Value, text string, opts decodeOpts) (bool
 
 // decodeReflect handles primitive, slice, array, and map kinds.
 // Returns [ErrUnsupportedType] for chan, func, complex, interface, and
-// struct (which should have been handled by the interface chain).
-func decodeReflect(dst reflect.Value, text string, opts decodeOpts) error {
+// struct (which should have been handled by the interface chain). ctx
+// propagates to nested element/value decoding.
+func decodeReflect(ctx context.Context, dst reflect.Value, text string, opts decodeOpts) error {
 	switch dst.Kind() {
 	case reflect.String:
 		dst.SetString(text)
@@ -175,11 +186,11 @@ func decodeReflect(dst reflect.Value, text string, opts decodeOpts) error {
 		dst.SetFloat(n)
 		return nil
 	case reflect.Slice:
-		return decodeSlice(dst, text, opts)
+		return decodeSlice(ctx, dst, text, opts)
 	case reflect.Array:
-		return decodeArrayNonByte(dst, text, opts)
+		return decodeArrayNonByte(ctx, dst, text, opts)
 	case reflect.Map:
-		return decodeMap(dst, text, opts)
+		return decodeMap(ctx, dst, text, opts)
 	}
 	return fmt.Errorf("%w: %s", ErrUnsupportedType, dst.Type())
 }
@@ -237,7 +248,7 @@ func decodeBytes(dst reflect.Value, text string, opts decodeOpts) error {
 	return nil
 }
 
-func decodeSlice(dst reflect.Value, text string, opts decodeOpts) error {
+func decodeSlice(ctx context.Context, dst reflect.Value, text string, opts decodeOpts) error {
 	sep := separatorOr(opts.Separator, ",")
 	var parts []string
 	if text != "" {
@@ -246,7 +257,7 @@ func decodeSlice(dst reflect.Value, text string, opts decodeOpts) error {
 	out := reflect.MakeSlice(dst.Type(), len(parts), len(parts))
 	elemOpts := decodeOpts{Layout: opts.Layout}
 	for i, p := range parts {
-		if err := decodeValue(out.Index(i), p, elemOpts); err != nil {
+		if err := decodeValue(ctx, out.Index(i), p, elemOpts); err != nil {
 			return err
 		}
 	}
@@ -254,7 +265,7 @@ func decodeSlice(dst reflect.Value, text string, opts decodeOpts) error {
 	return nil
 }
 
-func decodeArrayNonByte(dst reflect.Value, text string, opts decodeOpts) error {
+func decodeArrayNonByte(ctx context.Context, dst reflect.Value, text string, opts decodeOpts) error {
 	sep := separatorOr(opts.Separator, ",")
 	var parts []string
 	if text != "" {
@@ -269,14 +280,14 @@ func decodeArrayNonByte(dst reflect.Value, text string, opts decodeOpts) error {
 	}
 	elemOpts := decodeOpts{Layout: opts.Layout}
 	for i, p := range parts {
-		if err := decodeValue(dst.Index(i), p, elemOpts); err != nil {
+		if err := decodeValue(ctx, dst.Index(i), p, elemOpts); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func decodeMap(dst reflect.Value, text string, opts decodeOpts) error {
+func decodeMap(ctx context.Context, dst reflect.Value, text string, opts decodeOpts) error {
 	sep := separatorOr(opts.Separator, ",")
 	kvSep := separatorOr(opts.KVSeparator, ":")
 	if text == "" {
@@ -298,11 +309,11 @@ func decodeMap(dst reflect.Value, text string, opts decodeOpts) error {
 			}
 		}
 		keyHolder := reflect.New(keyType)
-		if err := decodeValue(keyHolder.Elem(), k, decodeOpts{}); err != nil {
+		if err := decodeValue(ctx, keyHolder.Elem(), k, decodeOpts{}); err != nil {
 			return err
 		}
 		valHolder := reflect.New(valType)
-		if err := decodeValue(valHolder.Elem(), v, valOpts); err != nil {
+		if err := decodeValue(ctx, valHolder.Elem(), v, valOpts); err != nil {
 			return err
 		}
 		out.SetMapIndex(keyHolder.Elem(), valHolder.Elem())

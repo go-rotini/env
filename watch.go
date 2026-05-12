@@ -357,13 +357,7 @@ func (l *Loader) snapshotImmutable(t reflect.Type) (values map[string]string, me
 		}
 		key := l.opts.prefix + fd.Key
 		meta[key] = immutableMeta{goPath: fd.GoPath, secret: fd.Secret}
-		if v, ok := src.Lookup(key); ok {
-			values[key] = v
-		} else if fd.HasDefault {
-			values[key] = fd.DefaultValue
-		} else {
-			values[key] = unsetSentinel
-		}
+		values[key] = l.resolvedSnapshotValue(src, fd, key)
 	}
 	return values, meta, nil
 }
@@ -382,17 +376,35 @@ func (l *Loader) snapshotKnownKeys(t reflect.Type) (map[string]string, error) {
 	out := make(map[string]string, len(info.Fields))
 	for _, fd := range info.Fields {
 		key := l.opts.prefix + fd.Key
-		if v, ok := src.Lookup(key); ok {
-			out[key] = v
-			continue
-		}
-		if fd.HasDefault {
-			out[key] = fd.DefaultValue
-			continue
-		}
-		out[key] = unsetSentinel
+		out[key] = l.resolvedSnapshotValue(src, fd, key)
 	}
 	return out, nil
+}
+
+// resolvedSnapshotValue is the value the snapshot maps record for fd:
+// the source value if present, else the default= value, else the
+// [unsetSentinel]. For `expand`-tagged fields the result is the
+// post-expansion value, so a change in a referenced variable is visible
+// to change detection and to the immutable comparison even when the
+// field's own raw value did not change. Expansion errors fall back to
+// the raw value — a load that would hit such an error fails before the
+// snapshot is consulted.
+func (l *Loader) resolvedSnapshotValue(src Source, fd fieldDescriptor, key string) string {
+	var v string
+	switch sv, ok := src.Lookup(key); {
+	case ok:
+		v = sv
+	case fd.HasDefault:
+		v = fd.DefaultValue
+	default:
+		return unsetSentinel
+	}
+	if fd.Expand {
+		if ev, err := expandFieldValue(v, fd.GoPath, src.Lookup); err == nil {
+			v = ev
+		}
+	}
+	return v
 }
 
 // unsetSentinel marks "no source value, no default" so the immutable
