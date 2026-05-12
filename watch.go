@@ -64,7 +64,7 @@ func (l *Loader) Watch(ctx context.Context, v any) (<-chan Event, error) {
 	}
 	elemType := rv.Elem().Type()
 
-	prevImmutable, err := l.snapshotImmutable(elemType)
+	prevImmutable, immMeta, err := l.snapshotImmutable(elemType)
 	if err != nil {
 		return nil, err
 	}
@@ -72,17 +72,18 @@ func (l *Loader) Watch(ctx context.Context, v any) (<-chan Event, error) {
 	if err != nil {
 		return nil, err
 	}
+	redact := l.redactor()
 
 	reload := func(ctx context.Context, _ []string) reloadOutcome {
 		candidate := reflect.New(elemType)
 		if err := l.LoadContext(ctx, candidate.Interface()); err != nil {
 			return reloadOutcome{err: err}
 		}
-		newImmutable, err := l.snapshotImmutable(elemType)
+		newImmutable, _, err := l.snapshotImmutable(elemType)
 		if err != nil {
 			return reloadOutcome{err: err}
 		}
-		if mismatch := compareImmutable(prevImmutable, newImmutable); mismatch != nil {
+		if mismatch := compareImmutable(prevImmutable, newImmutable, immMeta, redact); mismatch != nil {
 			return reloadOutcome{err: mismatch}
 		}
 		newAll, err := l.snapshotKnownKeys(elemType)
@@ -326,36 +327,45 @@ func keysOf(m map[string]struct{}) []string {
 	return out
 }
 
+// immutableMeta is the per-key field metadata [snapshotImmutable]
+// carries so [compareImmutable] can fill in field context and redact
+// secret-tagged values in any [*ImmutableChangedError] it builds.
+type immutableMeta struct {
+	goPath string
+	secret bool
+}
+
 // snapshotImmutable captures the resolved values of every
-// immutable-tagged field of t. Unset / no-default keys take the
-// [unsetSentinel] so the comparison can distinguish set-to-empty
-// from missing.
-func (l *Loader) snapshotImmutable(t reflect.Type) (map[string]string, error) {
+// immutable-tagged field of t, plus each key's field metadata. Unset /
+// no-default keys take the [unsetSentinel] so the comparison can
+// distinguish set-to-empty from missing. The returned meta map is a
+// pure function of t (no source values) — capture it once.
+func (l *Loader) snapshotImmutable(t reflect.Type) (values map[string]string, meta map[string]immutableMeta, err error) {
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	info, err := l.structInfo(t)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	src := l.composedSource()
-	out := make(map[string]string, len(info.Fields))
+	values = make(map[string]string, len(info.Fields))
+	meta = make(map[string]immutableMeta, len(info.Fields))
 	for _, fd := range info.Fields {
 		if !fd.Immutable {
 			continue
 		}
 		key := l.opts.prefix + fd.Key
+		meta[key] = immutableMeta{goPath: fd.GoPath, secret: fd.Secret}
 		if v, ok := src.Lookup(key); ok {
-			out[key] = v
-			continue
+			values[key] = v
+		} else if fd.HasDefault {
+			values[key] = fd.DefaultValue
+		} else {
+			values[key] = unsetSentinel
 		}
-		if fd.HasDefault {
-			out[key] = fd.DefaultValue
-			continue
-		}
-		out[key] = unsetSentinel
 	}
-	return out, nil
+	return values, meta, nil
 }
 
 // snapshotKnownKeys captures the resolved values of every field of t
@@ -389,28 +399,48 @@ func (l *Loader) snapshotKnownKeys(t reflect.Type) (map[string]string, error) {
 // comparison treats "" → unset and unset → "" as real changes.
 const unsetSentinel = "\x00<unset>\x00"
 
-// compareImmutable returns a non-nil [*ImmutableChangedError] when
-// next differs from prev on any immutable key.
-func compareImmutable(prev, next map[string]string) error {
+// compareImmutable returns a non-nil [*ImmutableChangedError] when next
+// differs from prev on any immutable key. Old/New are made human-
+// readable (the unset sentinel renders as "<unset>") and, for
+// secret-tagged fields, run through redact.
+func compareImmutable(prev, next map[string]string, meta map[string]immutableMeta, redact func(string) string) error {
+	mkErr := func(key, oldV, newV string) error {
+		m := meta[key]
+		return &ImmutableChangedError{
+			Field: m.goPath,
+			Key:   key,
+			Old:   displayImmutable(oldV, m.secret, redact),
+			New:   displayImmutable(newV, m.secret, redact),
+		}
+	}
 	for key, prevVal := range prev {
 		newVal, ok := next[key]
-		if !ok || newVal != prevVal {
-			return &ImmutableChangedError{
-				Key: key,
-				Old: prevVal,
-				New: newVal,
-			}
+		if !ok {
+			return mkErr(key, prevVal, unsetSentinel)
+		}
+		if newVal != prevVal {
+			return mkErr(key, prevVal, newVal)
 		}
 	}
 	for key, newVal := range next {
 		if _, ok := prev[key]; !ok {
-			return &ImmutableChangedError{
-				Key: key,
-				New: newVal,
-			}
+			return mkErr(key, unsetSentinel, newVal)
 		}
 	}
 	return nil
+}
+
+// displayImmutable renders an immutable snapshot value for an error
+// message: the unset sentinel becomes "<unset>", and a secret-tagged
+// value is run through redact.
+func displayImmutable(v string, secret bool, redact func(string) string) string {
+	if v == unsetSentinel {
+		return "<unset>"
+	}
+	if secret {
+		return redact(v)
+	}
+	return v
 }
 
 // diffSnapshots returns the sorted union of keys whose resolved value

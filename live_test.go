@@ -3,6 +3,7 @@ package env_test
 import (
 	"errors"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -181,6 +182,37 @@ func TestLive_ImmutableChangeRejected(t *testing.T) {
 	}
 	if live.Get() != old {
 		t.Error("Live installed a new pointer despite immutable rejection")
+	}
+}
+
+func TestLive_ImmutableSecretRedacted(t *testing.T) {
+	t.Parallel()
+	src := newPushSource(map[string]string{"SECRET_TIER": "alpha-1"})
+	type cfg struct {
+		Tier string `env:"SECRET_TIER,immutable,secret"`
+	}
+	live, err := env.NewLive[cfg](env.WithSource(src), env.WithReloadDebounce(20*time.Millisecond))
+	if err != nil {
+		t.Fatalf("NewLive: %v", err)
+	}
+	t.Cleanup(func() { _ = live.Close() })
+
+	src.set("SECRET_TIER", "beta-22") // immutable secret — must reject, without leaking values.
+	ev := awaitEvent(t, live.Events(), "after immutable-secret change")
+	var ice *env.ImmutableChangedError
+	if !errors.As(ev.Err, &ice) {
+		t.Fatalf("ev.Err = %v, want *ImmutableChangedError", ev.Err)
+	}
+	for _, secret := range []string{"alpha-1", "beta-22"} {
+		if strings.Contains(ice.Old, secret) || strings.Contains(ice.New, secret) || strings.Contains(ev.Err.Error(), secret) {
+			t.Errorf("secret value %q leaked: Old=%q New=%q msg=%q", secret, ice.Old, ice.New, ev.Err.Error())
+		}
+	}
+	if ice.Old == "" || ice.New == "" {
+		t.Errorf("Old/New should be redaction markers, got Old=%q New=%q", ice.Old, ice.New)
+	}
+	if ice.Field != "Tier" {
+		t.Errorf("Field = %q, want Tier", ice.Field)
 	}
 }
 

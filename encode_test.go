@@ -562,6 +562,20 @@ func TestEncode_ByteSlice_Base64(t *testing.T) {
 	}
 }
 
+func TestEncode_ByteSlice_InvalidUTF8Preserved(t *testing.T) {
+	// A []byte field whose content is not valid UTF-8 and needs quoting
+	// (because of the leading space) must round-trip byte-for-byte — the
+	// encoder iterates bytes, not runes, so 0xAA is not collapsed to U+FFFD.
+	type cfg struct {
+		B []byte `env:"B"`
+	}
+	val := []byte{' ', 'A', '=', 0xaa}
+	out := encodeToString(t, cfg{B: val})
+	if !strings.Contains(out, "B=\" A=\xaa\"") {
+		t.Fatalf("encoded = %q, want a line `B=\" A=\\xaa\"`", out)
+	}
+}
+
 func TestEncode_ByteSlice_Hex(t *testing.T) {
 	type cfg struct {
 		B []byte `env:"B,hex"`

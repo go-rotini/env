@@ -395,35 +395,41 @@ func formatValue(s string, quoteAll bool) string {
 	return quoteValue(s)
 }
 
-// needsQuoting reports whether s contains a character that would be
+// needsQuoting reports whether s contains a byte that would be
 // misinterpreted in a bare .env value: whitespace, `#`, `$`, quotes,
-// backslash, backtick, or any control character.
+// backslash, backtick, or any control byte. Iteration is byte-wise —
+// not rune-wise — so values containing invalid UTF-8 are classified by
+// their actual bytes (and round-trip unchanged).
 func needsQuoting(s string) bool {
 	if s == "" {
 		return false
 	}
-	for _, r := range s {
-		switch r {
+	for i := range len(s) {
+		switch c := s[i]; c {
 		case ' ', '\t', '\n', '\r', '\v', '\f':
 			return true
 		case '#', '$', '"', '\'', '\\', '`':
 			return true
-		}
-		if r < 0x20 || r == 0x7F {
-			return true
+		default:
+			if c < 0x20 || c == 0x7F {
+				return true
+			}
 		}
 	}
 	return false
 }
 
 // quoteValue double-quotes s with the standard escape table applied.
-// The result is parseable by github.com/go-rotini/dotenv and by joho/godotenv.
+// The result is parseable by github.com/go-rotini/dotenv and by
+// joho/godotenv. Iteration is byte-wise so every byte — including bytes
+// that are part of invalid UTF-8 — is emitted verbatim (or escaped)
+// rather than replaced.
 func quoteValue(s string) string {
 	var b strings.Builder
 	b.Grow(len(s) + 2)
 	b.WriteByte('"')
-	for _, r := range s {
-		switch r {
+	for i := range len(s) {
+		switch c := s[i]; c {
 		case '"':
 			b.WriteString(`\"`)
 		case '\\':
@@ -441,7 +447,7 @@ func quoteValue(s string) string {
 		case '$':
 			b.WriteString(`\$`)
 		default:
-			b.WriteRune(r)
+			b.WriteByte(c)
 		}
 	}
 	b.WriteByte('"')

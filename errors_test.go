@@ -18,7 +18,6 @@ func TestNilReceiverError(t *testing.T) {
 		{"MissingRequiredError", func() string { return (*MissingRequiredError)(nil).Error() }},
 		{"EmptyValueError", func() string { return (*EmptyValueError)(nil).Error() }},
 		{"ParseError", func() string { return (*ParseError)(nil).Error() }},
-		{"SyntaxError", func() string { return (*SyntaxError)(nil).Error() }},
 		{"ValidationError", func() string { return (*ValidationError)(nil).Error() }},
 		{"ImmutableChangedError", func() string { return (*ImmutableChangedError)(nil).Error() }},
 		{"CycleError", func() string { return (*CycleError)(nil).Error() }},
@@ -38,22 +37,6 @@ func TestNilReceiverError(t *testing.T) {
 	}
 	if u := (*ValidationError)(nil).Unwrap(); u != nil {
 		t.Errorf("nil ValidationError Unwrap = %v, want nil", u)
-	}
-}
-
-func TestPosition_String(t *testing.T) {
-	cases := []struct {
-		p    Position
-		want string
-	}{
-		{Position{}, ""},
-		{Position{Line: 5, Column: 7}, "line 5, column 7"},
-		{Position{File: "x.env", Line: 5, Column: 7}, "x.env:5:7"},
-	}
-	for _, tc := range cases {
-		if got := tc.p.String(); got != tc.want {
-			t.Errorf("Position(%+v).String() = %q, want %q", tc.p, got, tc.want)
-		}
 	}
 }
 
@@ -115,11 +98,6 @@ func TestParseError_EmptyForms(t *testing.T) {
 	if (&ParseError{}).Error() == "" {
 		t.Error("empty ParseError produced empty Error()")
 	}
-	// With Pos but no other fields
-	pos := Position{File: "x.env", Line: 3, Column: 5}
-	if got := (&ParseError{Pos: pos, Cause: errors.New("oops")}).Error(); !strings.Contains(got, "x.env:3:5") {
-		t.Errorf("Pos not rendered: %q", got)
-	}
 	// With cause but no type
 	if got := (&ParseError{Cause: errors.New("oops")}).Error(); !strings.Contains(got, "oops") {
 		t.Errorf("cause not rendered without Type: %q", got)
@@ -134,23 +112,6 @@ func TestParseError_Unwrap(t *testing.T) {
 	}
 	if u := errors.Unwrap(&ParseError{}); u != nil {
 		t.Errorf("Unwrap on no-cause = %v, want nil", u)
-	}
-}
-
-func TestSyntaxError(t *testing.T) {
-	e := &SyntaxError{Pos: Position{Line: 5, Column: 3}, Message: "bad escape"}
-	if !strings.Contains(e.Error(), "bad escape") {
-		t.Errorf("Error() missing message: %q", e.Error())
-	}
-	if !errors.Is(e, ErrSyntax) {
-		t.Errorf("errors.Is fails for SyntaxError")
-	}
-	// No-position form
-	if !strings.Contains((&SyntaxError{Message: "x"}).Error(), "x") {
-		t.Error("missing message")
-	}
-	if (&SyntaxError{}).Error() == "" {
-		t.Error("nil SyntaxError produced empty Error()")
 	}
 }
 

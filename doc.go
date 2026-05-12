@@ -53,12 +53,15 @@
 // what they import:
 //
 //   - github.com/go-rotini/dotenv — `.env` file parser, AST, lossless
-//     round-trip, Lint; surfaces a parsed file as a [Source]. Also has no
-//     third-party dependencies.
+//     round-trip, Lint. Its NewSource returns a value whose Lookup method
+//     is structurally compatible with [Source], so a parsed `.env` file
+//     plugs into a loader's source chain — dotenv does not import this
+//     package (or anything else; it has no dependencies).
 //   - github.com/go-rotini/fs — filesystem helpers including a
-//     content-agnostic file watcher (atomic-rename aware, debounced). A
-//     higher-level package composes it with dotenv (and the yaml/toml/jsonc
-//     parsers) to drive live reload of config files through [NewLive].
+//     content-agnostic file watcher (atomic-rename aware, debounced).
+//     Compose it with dotenv (or a yaml/toml/jsonc parser) into a [Source]
+//     that also implements [Watcher] to drive live reload of config files
+//     through [NewLive].
 //
 // # Tag system
 //
@@ -68,9 +71,12 @@
 //
 // Supported options: required, notEmpty, default=value, separator=char,
 // kvSeparator=char, expand, fromFile, secret, immutable, layout=format,
-// base64, hex, unset. Companion tags: envDesc:"..." for free-text help and
-// envPrefix:"PFX_" on nested struct fields. See the package README for the
-// full table.
+// base64, hex, unset. (`expand` performs `$VAR` / `${VAR}` / `${VAR-default}`
+// / `${VAR:-default}` / `${VAR:?message}` substitution on the resolved value,
+// resolving names verbatim against the source chain; unset references expand
+// to "". `${VAR:?msg}` for an unset VAR fails with [ErrExpansionAssertion].)
+// Companion tags: envDesc:"..." for free-text help and envPrefix:"PFX_" on
+// nested struct fields. See the package README for the full table.
 //
 // # Pitfalls
 //
@@ -99,11 +105,12 @@
 //   - Reload is driven by any [Source] that also implements [Watcher].
 //     Sources that don't are polled at the interval set by
 //     [WithPollInterval], or read once and never re-read if that option is
-//     absent. The github.com/go-rotini/fs watcher (used by the higher-level
-//     `.env` / yaml / toml / jsonc live-source package) handles editor
-//     "atomic save" patterns (write-temp-then-rename) by watching the parent
-//     directory and filtering by filename — the only correct strategy, since
-//     the rewritten file is a new inode.
+//     absent. For file-backed config (`.env` / yaml / toml / jsonc), wrap the
+//     parser in a [Source] + [Watcher] built on github.com/go-rotini/fs's file
+//     watcher, which handles the editor "atomic save" pattern
+//     (write-temp-then-rename) by watching the parent directory and filtering
+//     by filename — the only correct strategy, since the rewritten file is a
+//     new inode.
 //   - The reload pipeline parses + validates into a fresh candidate before
 //     swapping; failures retain the previous value and emit an error
 //     event. The struct returned by [Live.Get] is therefore always a

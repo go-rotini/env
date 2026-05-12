@@ -47,7 +47,7 @@ func NewLiveWithLoader[T any](l *Loader) (*Live[T], error) {
 	live.curr.Store(&initial)
 
 	tType := reflect.TypeOf(initial)
-	prevImmutable, err := l.snapshotImmutable(tType)
+	prevImmutable, immMeta, err := l.snapshotImmutable(tType)
 	if err != nil {
 		return nil, err
 	}
@@ -55,6 +55,7 @@ func NewLiveWithLoader[T any](l *Loader) (*Live[T], error) {
 	if err != nil {
 		return nil, err
 	}
+	redact := l.redactor()
 
 	ctx, cancel := context.WithCancel(context.Background()) //nolint:gosec // cancel is invoked from Live.Close; the engine outlives this constructor.
 	live.cancel = cancel
@@ -64,11 +65,11 @@ func NewLiveWithLoader[T any](l *Loader) (*Live[T], error) {
 		if err := l.LoadContext(ctx, &candidate); err != nil {
 			return reloadOutcome{err: err}
 		}
-		newImmutable, err := l.snapshotImmutable(tType)
+		newImmutable, _, err := l.snapshotImmutable(tType)
 		if err != nil {
 			return reloadOutcome{err: err}
 		}
-		if mismatch := compareImmutable(prevImmutable, newImmutable); mismatch != nil {
+		if mismatch := compareImmutable(prevImmutable, newImmutable, immMeta, redact); mismatch != nil {
 			return reloadOutcome{err: mismatch}
 		}
 		newAll, err := l.snapshotKnownKeys(tType)

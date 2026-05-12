@@ -15,7 +15,6 @@ type loaderOptions struct {
 	prefix         string
 	tagName        string
 	fieldNameXform func(string) string
-	relaxedNames   bool
 	requireAll     bool
 	logger         *slog.Logger
 	customDecoders map[reflect.Type]customDecoderFn
@@ -122,16 +121,6 @@ func WithFieldNameTransform(fn func(goFieldName string) string) Option {
 		if fn != nil {
 			o.fieldNameXform = fn
 		}
-	}
-}
-
-// WithRelaxedNames accepts `env:"NAME"` tag identifiers containing
-// characters outside the POSIX [A-Za-z_][A-Za-z0-9_]* class (hyphens,
-// dots, non-ASCII). Default is POSIX-strict; [OSEnv] defers to the OS
-// for which names exist.
-func WithRelaxedNames() Option {
-	return func(o *loaderOptions) {
-		o.relaxedNames = true
 	}
 }
 

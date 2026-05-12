@@ -865,15 +865,14 @@ func (c *ctxUnmarshaler) UnmarshalEnv(_ context.Context, s string) error {
 	return nil
 }
 
-func TestDecode_UnmarshalerContext_NotInvokedYet(t *testing.T) {
-	// UnmarshalerContext is consulted by [Loader.LoadContext], not by
-	// the value-decoder; a type implementing only UnmarshalerContext
-	// falls through to default reflection here.
-	got, err := decodeInto[ctxUnmarshaler](t, "x", decodeOpts{})
-	if !errors.Is(err, ErrUnsupportedType) {
+func TestDecode_UnmarshalerContext_DecoderLevelFallsThrough(t *testing.T) {
+	// UnmarshalerContext is consulted by the loader (which has a context),
+	// not by the context-free value decoder; a type implementing only
+	// UnmarshalerContext is unsupported at the decoder level. The
+	// loader-level wiring is exercised by TestLoad_UnmarshalerContext.
+	if _, err := decodeInto[ctxUnmarshaler](t, "x", decodeOpts{}); !errors.Is(err, ErrUnsupportedType) {
 		t.Errorf("err = %v, want ErrUnsupportedType", err)
 	}
-	_ = got
 }
 
 // --- option propagation through containers ---

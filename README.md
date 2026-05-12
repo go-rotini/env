@@ -7,13 +7,14 @@ This package is used as the default environment-variable support package for [ro
 ## Features
 
 - One-line happy path: `env.Load(&cfg)` is enough for most programs
-- `encoding/json`-shaped API: single comma-separated `env:"NAME,opt1,opt2"` tag, generic `LoadTo[T]` convenience, `Encoder`-style `Loader` for advanced cases
-- Aggregated multi-error reporting with source-and-line attribution
+- `encoding/json`-shaped API: single comma-separated `env:"NAME,opt1,opt2"` tag, generic `LoadTo[T]` convenience, a configurable `Loader` (the `Decoder`-style entry point) for advanced cases
+- Aggregated multi-error reporting with per-field attribution (`*MultiError`, `FormatError`)
 - Principled `Source` interface: `OSEnv()`, `Map`, `Multi(...)` built in; `.env` parsing via [go-rotini/dotenv](https://github.com/go-rotini/dotenv); remote secret backends in their own modules — all equal citizens
+- `context.Context` support: `LoadContext` threads the context to mutators and to `UnmarshalerContext` / `ValidatorContext` hooks
 - Atomic, lock-free reads on reload via `Live[T]` and `sync/atomic.Pointer`
-- Per-field `immutable` enforcement: reload candidates that change a marked field are rejected
+- Per-field `immutable` enforcement: reload candidates that change a marked field are rejected (old/new values redacted for `secret` fields)
 - Secret-redacting output (`String()`, `Describe`, `PrintUsage`, `Markdown`, `Encode`) plus a `Secret[T]` wrapper integrating with `slog.LogValuer`
-- Variable expansion on tagged values: `$VAR`, `${VAR}`, `${VAR:-default}`, `${VAR:?error}` (opt-in via the `expand` tag option)
+- Variable expansion on tagged values (`expand` tag): `$VAR`, `${VAR}`, `${VAR-default}`, `${VAR:-default}`, `${VAR:?error}` — references resolve against the source chain, used verbatim (no `WithPrefix` applied)
 - Built-in support for `time.Duration`, `time.Time`, `*time.Location`, `url.URL`, `net.IP`, `*net.IPNet`, `regexp.Regexp`, `[]byte` (raw, base64, hex), plus `encoding.TextUnmarshaler` and `encoding.BinaryUnmarshaler` interop
 - Mutator chain for value rewriting (resolving `secret://` indirections, fetching from a vault) and observation (logging, metrics)
 - `Validate() error` lifecycle hook for cross-field rules
@@ -70,7 +71,8 @@ func main() {
 ## Loading from a `.env` file
 
 `.env` parsing lives in the separate [`github.com/go-rotini/dotenv`](https://github.com/go-rotini/dotenv)
-package, which surfaces a parsed file as an `env.Source`:
+package (which has no dependencies). Its `NewSource` returns a value usable directly
+as a `Source` — dotenv doesn't import this package; the method sets just line up:
 
 ```go
 import (
@@ -200,8 +202,15 @@ func (c *Config) Validate() error {
 }
 ```
 
-On reload, the validator runs against the new candidate; failure retains the
-previous value.
+For validation that needs the request context, implement `Validate(ctx context.Context) error`
+instead (the `ValidatorContext` interface) — the loader passes the context given to
+`LoadContext` (or `context.Background()` for plain `Load`). A type implements one or the other,
+not both. On reload, the validator runs against the new candidate; failure retains the previous
+value.
+
+Likewise, a custom field type can implement `UnmarshalEnv(ctx context.Context, s string) error`
+(`UnmarshalerContext`) to receive the context during decoding, instead of the plain
+`UnmarshalEnv(s string) error` (`Unmarshaler`).
 
 ## Documentation
 

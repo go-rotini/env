@@ -6,35 +6,12 @@ import (
 	"strings"
 )
 
-// Position identifies a location within source text. A zero value
-// (Line == 0) means no position is available; only `.env` parse errors
-// carry positions.
-type Position struct {
-	File   string
-	Line   int
-	Column int
-	Offset int
-}
-
-// String renders p as "file:line:column" when File is set, "line N,
-// column C" otherwise, or "" when no line is recorded.
-func (p Position) String() string {
-	if p.Line <= 0 {
-		return ""
-	}
-	if p.File != "" {
-		return fmt.Sprintf("%s:%d:%d", p.File, p.Line, p.Column)
-	}
-	return fmt.Sprintf("line %d, column %d", p.Line, p.Column)
-}
-
 // MissingRequiredError is reported for a field marked required (or
 // notEmpty) whose key is absent from every Source and which has no
 // default.
 type MissingRequiredError struct {
 	Field string
 	Key   string
-	Pos   Position
 }
 
 func (e *MissingRequiredError) Error() string {
@@ -54,7 +31,6 @@ func (*MissingRequiredError) Is(target error) bool {
 type EmptyValueError struct {
 	Field string
 	Key   string
-	Pos   Position
 }
 
 func (e *EmptyValueError) Error() string {
@@ -70,8 +46,8 @@ func (*EmptyValueError) Is(target error) bool {
 }
 
 // ParseError is reported when a string value cannot be converted to a
-// field's target Go type. Field, Key, and Pos may be empty when the
-// error originates inside the decoder before the loader has wrapped
+// field's target Go type. Field, Key, Value, and Type may be empty when
+// the error originates inside the decoder before the loader has wrapped
 // it with field context.
 type ParseError struct {
 	Field string
@@ -79,7 +55,6 @@ type ParseError struct {
 	Value string
 	Type  string
 	Cause error
-	Pos   Position
 }
 
 func (e *ParseError) Error() string {
@@ -88,9 +63,6 @@ func (e *ParseError) Error() string {
 	}
 	var b strings.Builder
 	b.WriteString("env: ")
-	if e.Pos.Line > 0 {
-		fmt.Fprintf(&b, "%s: ", e.Pos.String())
-	}
 	switch {
 	case e.Type == "" && e.Cause == nil:
 		b.WriteString("parse error")
@@ -124,30 +96,8 @@ func (e *ParseError) Unwrap() error {
 	return e.Cause
 }
 
-// SyntaxError is reported when a `.env` file is malformed (unterminated
-// quote, bad escape, etc.).
-type SyntaxError struct {
-	Pos     Position
-	Message string
-}
-
-func (e *SyntaxError) Error() string {
-	if e == nil {
-		return "env: syntax error"
-	}
-	if e.Pos.Line > 0 {
-		return fmt.Sprintf("env: %s: %s", e.Pos.String(), e.Message)
-	}
-	return fmt.Sprintf("env: %s", e.Message)
-}
-
-func (*SyntaxError) Is(target error) bool {
-	_, ok := target.(*SyntaxError)
-	return ok
-}
-
 // ValidationError wraps an error returned from a target struct's
-// [Validator.Validate] method.
+// [Validator.Validate] (or [ValidatorContext.Validate]) method.
 type ValidationError struct {
 	Cause error
 }
@@ -171,9 +121,9 @@ func (e *ValidationError) Unwrap() error {
 	return e.Cause
 }
 
-// ImmutableChangedError is reported when a [Live] reload candidate
-// would have changed a field tagged immutable. Old and New are
-// redacted for secret-tagged fields.
+// ImmutableChangedError is reported when a reload candidate would have
+// changed a field tagged immutable. For secret-tagged fields, Old and
+// New are redacted (run through the loader's secret redactor).
 type ImmutableChangedError struct {
 	Field string
 	Key   string
@@ -193,11 +143,15 @@ func (*ImmutableChangedError) Is(target error) bool {
 	return ok
 }
 
-// CycleError is reported when variable expansion encounters a
-// reference cycle (A → B → A).
+// CycleError is reported when variable expansion (the `expand` tag
+// option) does not terminate — a reference cycle (A → B → A) or
+// excessive nesting in `${VAR:-default}` chains.
 type CycleError struct {
+	// Chain is the reference chain leading to the cycle, e.g.
+	// ["DSN", "HOST", "DSN"]. It may hold a single element when the
+	// non-termination is a self-referential default rather than a
+	// genuine cross-variable cycle.
 	Chain []string
-	Pos   Position
 }
 
 func (e *CycleError) Error() string {
@@ -268,9 +222,6 @@ var (
 	// ErrParse matches any [*ParseError].
 	ErrParse = &ParseError{}
 
-	// ErrSyntax matches any [*SyntaxError].
-	ErrSyntax = &SyntaxError{}
-
 	// ErrValidation matches any [*ValidationError].
 	ErrValidation = &ValidationError{}
 
@@ -304,21 +255,14 @@ var (
 	// unmarshaler).
 	ErrUnsupportedType = errors.New("env: unsupported target type")
 
-	// ErrUnsetExpansion is returned under [WithStrictExpansion] (and the
-	// dotenv equivalent) when expansion encounters an unset variable.
-	ErrUnsetExpansion = errors.New("env: variable referenced in expansion is unset")
-
-	// ErrExpansionAssertion is returned when a ${VAR:?msg} assertion
-	// fails during expansion.
+	// ErrExpansionAssertion is returned (wrapped, with field context)
+	// when a `${VAR:?message}` reference in an `expand`-tagged value
+	// names a variable that is not set.
 	ErrExpansionAssertion = errors.New("env: ${VAR:?...} assertion failed")
 
 	// ErrFromFileRead is returned when a fromFile-tagged field
 	// references a path that cannot be read.
 	ErrFromFileRead = errors.New("env: fromFile target is not readable")
-
-	// ErrBlockSizeExceeded is returned when a rendered env block exceeds
-	// a platform size limit.
-	ErrBlockSizeExceeded = errors.New("env: rendered env block exceeds platform limit")
 )
 
 // FormatError renders err into a human-readable string. For

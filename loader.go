@@ -17,8 +17,7 @@ type Loader struct {
 
 // New returns a [Loader] with opts applied to the defaults: source
 // chain = [[OSEnv]], no prefix, tag name "env", SCREAMING_SNAKE_CASE
-// field-name transform, no logger, POSIX-strict identifier rules,
-// optional-by-default field policy.
+// field-name transform, no logger, optional-by-default field policy.
 func New(opts ...Option) *Loader {
 	o := defaultLoaderOptions()
 	for _, opt := range opts {
@@ -36,8 +35,13 @@ func (l *Loader) Load(v any) error {
 }
 
 // LoadContext is like [Loader.Load] but accepts a context. ctx is
-// forwarded to the [Mutator] chain and to the [Validator] hook.
+// forwarded to the [Mutator] chain, to fields whose type implements
+// [UnmarshalerContext], and to a [ValidatorContext] hook on the target
+// struct (if it implements one). ctx must not be nil.
 func (l *Loader) LoadContext(ctx context.Context, v any) error {
+	if ctx == nil {
+		return ErrNilContext
+	}
 	if v == nil {
 		return ErrNilPointer
 	}
@@ -64,11 +68,17 @@ func (l *Loader) LoadContext(ctx context.Context, v any) error {
 
 	// Skip whole-struct validation when per-field errors exist; the
 	// struct is in a partial state and Validate would amplify noise.
+	// ValidatorContext is preferred over Validator when both are present.
 	if len(multi.Errors) == 0 {
-		if v, ok := rv.Addr().Interface().(Validator); ok {
-			if err := v.Validate(); err != nil {
-				multi.Append(&ValidationError{Cause: err})
-			}
+		var verr error
+		switch v := rv.Addr().Interface().(type) {
+		case ValidatorContext:
+			verr = v.Validate(ctx)
+		case Validator:
+			verr = v.Validate()
+		}
+		if verr != nil {
+			multi.Append(&ValidationError{Cause: verr})
 		}
 	}
 
@@ -78,11 +88,12 @@ func (l *Loader) LoadContext(ctx context.Context, v any) error {
 	return nil
 }
 
-// Snapshot returns the resolved values for every recognized field of
-// v as a map keyed by env-var name (with [WithPrefix] applied).
-// Defaults are emitted for keys absent from the source chain; fields
-// with no source value and no default are omitted. Useful for tests
-// and debugging — pass the result to [Map] to mirror the live state.
+// Snapshot returns, for every recognized field of v, the raw value the
+// loader would start from: the source-chain value if present, otherwise
+// the field's default= value; fields with neither are omitted. Keys
+// carry [WithPrefix]. Mutators, the `expand` tag, `fromFile`, and
+// decoding are NOT applied — Snapshot is the "what the sources say"
+// view, useful for tests and debugging (feed it back to [Map]).
 func (l *Loader) Snapshot(v any) (map[string]string, error) {
 	if v == nil {
 		return nil, ErrNilPointer
@@ -177,10 +188,12 @@ func (l *Loader) composedSource() Source {
 //  1. Source lookup.
 //  2. Default application (if not sourced).
 //  3. Mutator chain (may rewrite or synthesize).
-//  4. Required / notEmpty checks.
-//  5. fromFile substitution (read file contents as the value).
-//  6. Decode (custom decoder or built-in).
-//  7. unset (call os.Unsetenv unless [WithoutUnset]).
+//  4. Required check (when the field has no value at all).
+//  5. Variable expansion (`expand` tag).
+//  6. notEmpty check.
+//  7. fromFile substitution (read file contents as the value).
+//  8. Decode: custom decoder, then [UnmarshalerContext], then the value decoder.
+//  9. unset (call os.Unsetenv unless [WithoutUnset]).
 func (l *Loader) populateField(ctx context.Context, root reflect.Value, fd fieldDescriptor, src Source, multi *MultiError) {
 	resolvedKey := l.opts.prefix + fd.Key
 
@@ -219,6 +232,15 @@ func (l *Loader) populateField(ctx context.Context, root reflect.Value, fd field
 		return
 	}
 
+	if fd.Expand {
+		expanded, err := expandFieldValue(rawValue, fd.GoPath, src.Lookup)
+		if err != nil {
+			multi.Append(err)
+			return
+		}
+		rawValue = expanded
+	}
+
 	if fd.NotEmpty && rawValue == "" {
 		multi.Append(&EmptyValueError{
 			Field: fd.GoPath,
@@ -247,6 +269,15 @@ func (l *Loader) populateField(ctx context.Context, root reflect.Value, fd field
 	if dec, ok := l.opts.customDecoders[field.Type()]; ok {
 		if err := dec(rawValue, field); err != nil {
 			multi.Append(l.annotateParseError(err, fd, resolvedKey, rawValue, field.Type()))
+			return
+		}
+		l.maybeUnset(fd, resolvedKey)
+		return
+	}
+
+	if uc, ok := field.Addr().Interface().(UnmarshalerContext); ok {
+		if err := uc.UnmarshalEnv(ctx, rawValue); err != nil {
+			multi.Append(l.annotateParseError(wrapDecodeErr(field.Type(), rawValue, err), fd, resolvedKey, rawValue, field.Type()))
 			return
 		}
 		l.maybeUnset(fd, resolvedKey)

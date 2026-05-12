@@ -860,3 +860,117 @@ func TestLoader_AnnotateParseError_LeavesNonParseErrorUnchanged(t *testing.T) {
 		t.Errorf("plain error was wrapped in *ParseError unexpectedly")
 	}
 }
+
+// --- context-aware hooks: UnmarshalerContext / ValidatorContext ---
+
+type ctxHookKey struct{}
+
+func ctxWithMarker() context.Context {
+	return context.WithValue(context.Background(), ctxHookKey{}, "marker")
+}
+
+type ucRecorder struct {
+	got    string
+	sawCtx bool
+}
+
+func (u *ucRecorder) UnmarshalEnv(ctx context.Context, s string) error {
+	u.got = s
+	if v, _ := ctx.Value(ctxHookKey{}).(string); v == "marker" {
+		u.sawCtx = true
+	}
+	return nil
+}
+
+type ucErroring struct{}
+
+func (ucErroring) UnmarshalEnv(context.Context, string) error { return errors.New("uc boom") }
+
+func TestLoad_UnmarshalerContext(t *testing.T) {
+	loader := New(WithSource(Map(map[string]string{"X": "hello"})))
+
+	// Plain Load invokes UnmarshalerContext with context.Background().
+	var c1 struct {
+		X ucRecorder `env:"X"`
+	}
+	if err := loader.Load(&c1); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c1.X.got != "hello" {
+		t.Errorf("UnmarshalEnv(ctx, s) not invoked: got %q", c1.X.got)
+	}
+	if c1.X.sawCtx {
+		t.Errorf("Load should pass context.Background(), not a marked context")
+	}
+
+	// LoadContext threads the supplied context.
+	var c2 struct {
+		X ucRecorder `env:"X"`
+	}
+	if err := loader.LoadContext(ctxWithMarker(), &c2); err != nil {
+		t.Fatalf("LoadContext: %v", err)
+	}
+	if c2.X.got != "hello" || !c2.X.sawCtx {
+		t.Errorf("LoadContext did not thread ctx: got=%q sawCtx=%v", c2.X.got, c2.X.sawCtx)
+	}
+}
+
+func TestLoad_UnmarshalerContext_Error(t *testing.T) {
+	loader := New(WithSource(Map(map[string]string{"X": "v"})))
+	var c struct {
+		X ucErroring `env:"X"`
+	}
+	err := loader.Load(&c)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, ErrParse) {
+		t.Errorf("err = %v, want *ParseError", err)
+	}
+	if !strings.Contains(err.Error(), "uc boom") {
+		t.Errorf("err missing cause: %v", err)
+	}
+}
+
+type ctxValidatedCfg struct {
+	A      string `env:"A"`
+	sawCtx bool
+}
+
+func (c *ctxValidatedCfg) Validate(ctx context.Context) error {
+	if v, _ := ctx.Value(ctxHookKey{}).(string); v == "marker" {
+		c.sawCtx = true
+	}
+	if c.A == "" {
+		return errors.New("A is required")
+	}
+	return nil
+}
+
+func TestLoad_ValidatorContext(t *testing.T) {
+	loader := New(WithSource(Map(map[string]string{"A": "set"})))
+	var c ctxValidatedCfg
+	if err := loader.LoadContext(ctxWithMarker(), &c); err != nil {
+		t.Fatalf("LoadContext: %v", err)
+	}
+	if !c.sawCtx {
+		t.Errorf("ValidatorContext.Validate did not receive the context")
+	}
+
+	// Failure path: A unset → Validate returns an error → *ValidationError.
+	var c2 ctxValidatedCfg
+	if err := New(WithSource(Map(map[string]string{}))).Load(&c2); !errors.Is(err, ErrValidation) {
+		t.Errorf("err = %v, want ErrValidation", err)
+	}
+}
+
+func TestLoadContext_NilContext(t *testing.T) {
+	loader := New(WithSource(Map(map[string]string{"X": "v"})))
+	var c struct {
+		X string `env:"X"`
+	}
+	var nilCtx context.Context // intentional: exercises the nil-ctx guard
+	if err := loader.LoadContext(nilCtx, &c); !errors.Is(err, ErrNilContext) {
+		t.Errorf("LoadContext(nil, ...) = %v, want ErrNilContext", err)
+	}
+}

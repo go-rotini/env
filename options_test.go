@@ -18,7 +18,7 @@ func TestDefaultLoaderOptions(t *testing.T) {
 	if o.fieldNameXform == nil {
 		t.Errorf("default fieldNameXform is nil")
 	}
-	if o.prefix != "" || o.relaxedNames || o.requireAll {
+	if o.prefix != "" || o.requireAll {
 		t.Errorf("non-zero defaults: %+v", o)
 	}
 }
@@ -101,14 +101,6 @@ func TestWithFieldNameTransform_NilIgnored(t *testing.T) {
 	// Compare via function-pointer identity — should be unchanged.
 	if reflect.ValueOf(o.fieldNameXform).Pointer() != reflect.ValueOf(original).Pointer() {
 		t.Errorf("nil transform replaced default; expected no-op")
-	}
-}
-
-func TestWithRelaxedNames(t *testing.T) {
-	o := defaultLoaderOptions()
-	WithRelaxedNames()(&o)
-	if !o.relaxedNames {
-		t.Errorf("relaxedNames not set")
 	}
 }
 

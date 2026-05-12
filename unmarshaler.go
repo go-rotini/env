@@ -9,9 +9,14 @@ type Unmarshaler interface {
 	UnmarshalEnv(s string) error
 }
 
-// UnmarshalerContext is like [Unmarshaler] but receives a context.
-// Invoked when loading through [Loader.LoadContext]; the loader
-// prefers it over [Unmarshaler] when both are implemented.
+// UnmarshalerContext is like [Unmarshaler] but receives the context
+// passed to [Loader.LoadContext] (or context.Background() for
+// [Loader.Load] / the package-level [Load]). The loader checks a
+// field's address for this interface and, failing that, for
+// [Unmarshaler] — a type satisfies one or the other, never both (Go
+// method names cannot be overloaded). It is consulted only at the top
+// level of a field, not for slice elements or map values, which the
+// (context-free) value decoder handles.
 type UnmarshalerContext interface {
 	UnmarshalEnv(ctx context.Context, s string) error
 }
