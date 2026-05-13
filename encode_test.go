@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +26,23 @@ func encodeToString(t *testing.T, v any, opts ...EncodeOption) string {
 		t.Fatalf("Encode failed: %v", err)
 	}
 	return buf.String()
+}
+
+// assertOwnerOnly checks that path is not group/other-accessible. It is
+// a no-op on Windows, which has no Unix permission bits — os.Stat
+// reports 0666 there regardless of the mode passed to OpenFile.
+func assertOwnerOnly(t *testing.T, path string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		return
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := fi.Mode().Perm(); perm&0o077 != 0 {
+		t.Errorf("perm %o exposes group/other access, want owner-only", perm)
+	}
 }
 
 // --- happy path ---
@@ -786,14 +804,7 @@ func TestEncodeFile(t *testing.T) {
 	if !strings.Contains(string(data), "PORT=9000") {
 		t.Errorf("file content: %q", data)
 	}
-	// Verify mode 0600.
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if mode := info.Mode().Perm(); mode != 0o600 {
-		t.Errorf("mode = %o, want 0600", mode)
-	}
+	assertOwnerOnly(t, path)
 }
 
 func TestEncodeFile_OpenFails(t *testing.T) {
@@ -940,11 +951,7 @@ func TestLoader_EncodeFile(t *testing.T) {
 	if !strings.Contains(string(data), "APP_PORT=9000") {
 		t.Errorf("file content: %q", data)
 	}
-	if info, err := os.Stat(path); err != nil {
-		t.Fatal(err)
-	} else if mode := info.Mode().Perm(); mode != 0o600 {
-		t.Errorf("mode = %o, want 0600", mode)
-	}
+	assertOwnerOnly(t, path)
 }
 
 func TestLoader_Encode_NotStruct(t *testing.T) {
