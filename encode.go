@@ -79,7 +79,7 @@ func WithCustomMarshaler[T any](fn func(T) (string, error)) EncodeOption {
 		}
 		typ := reflect.TypeFor[T]()
 		o.customMarshalers[typ] = func(v reflect.Value) (string, error) {
-			t, _ := v.Interface().(T)
+			t, _ := reflect.TypeAssert[T](v)
 			return fn(t)
 		}
 	}
@@ -298,7 +298,7 @@ func (e *encoder) renderValue(field reflect.Value, fd fieldDescriptor) (string, 
 	}
 
 	if typ == timeTimeType && fd.Layout != "" {
-		t, _ := field.Interface().(time.Time)
+		t, _ := reflect.TypeAssert[time.Time](field)
 		return t.Format(fd.Layout), nil
 	}
 	if isByteContainer(typ) && (fd.Base64 || fd.Hex) {
@@ -307,21 +307,21 @@ func (e *encoder) renderValue(field reflect.Value, fd fieldDescriptor) (string, 
 
 	if field.CanAddr() {
 		addr := field.Addr()
-		if m, ok := addr.Interface().(Marshaler); ok {
+		if m, ok := reflect.TypeAssert[Marshaler](addr); ok {
 			s, err := m.MarshalEnv()
 			if err != nil {
 				return "", fmt.Errorf("env: %s.MarshalEnv: %w", typ, err)
 			}
 			return s, nil
 		}
-		if m, ok := addr.Interface().(encoding.TextMarshaler); ok {
+		if m, ok := reflect.TypeAssert[encoding.TextMarshaler](addr); ok {
 			data, err := m.MarshalText()
 			if err != nil {
 				return "", fmt.Errorf("env: %s.MarshalText: %w", typ, err)
 			}
 			return string(data), nil
 		}
-		if m, ok := addr.Interface().(encoding.BinaryMarshaler); ok {
+		if m, ok := reflect.TypeAssert[encoding.BinaryMarshaler](addr); ok {
 			data, err := m.MarshalBinary()
 			if err != nil {
 				return "", fmt.Errorf("env: %s.MarshalBinary: %w", typ, err)
@@ -332,13 +332,13 @@ func (e *encoder) renderValue(field reflect.Value, fd fieldDescriptor) (string, 
 
 	switch typ {
 	case timeDurationType:
-		d, _ := field.Interface().(time.Duration)
+		d, _ := reflect.TypeAssert[time.Duration](field)
 		return d.String(), nil
 	case timeLocationType:
-		loc, _ := field.Interface().(time.Location)
+		loc, _ := reflect.TypeAssert[time.Location](field)
 		return loc.String(), nil
 	case netIPNetType:
-		n, _ := field.Interface().(net.IPNet)
+		n, _ := reflect.TypeAssert[net.IPNet](field)
 		return n.String(), nil
 	}
 

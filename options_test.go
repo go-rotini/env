@@ -145,7 +145,7 @@ func TestWithCustomDecoder(t *testing.T) {
 	if called != 1 {
 		t.Errorf("decoder not called")
 	}
-	got, _ := holder.Elem().Interface().(myString)
+	got, _ := reflect.TypeAssert[myString](holder.Elem())
 	if got != "custom:hello" {
 		t.Errorf("got %q, want custom:hello", got)
 	}

@@ -4,14 +4,9 @@ import (
 	"encoding"
 	"errors"
 	"fmt"
-	"math/big"
-	"net"
-	"net/url"
 	"reflect"
-	"regexp"
 	"strings"
 	"sync"
-	"time"
 	"unicode"
 )
 
@@ -319,31 +314,21 @@ func toScreamingSnake(name string) string {
 	return b.String()
 }
 
-// builtinLeafStructTypes are struct types the walker treats as opaque
-// leaves. Listed explicitly for performance and to cover types like
-// [net.IPNet] that implement no unmarshaler interface.
-var builtinLeafStructTypes = map[reflect.Type]struct{}{
-	reflect.TypeFor[time.Time]():     {},
-	reflect.TypeFor[time.Location](): {},
-	reflect.TypeFor[url.URL]():       {},
-	reflect.TypeFor[net.IPNet]():     {},
-	reflect.TypeFor[regexp.Regexp](): {},
-	reflect.TypeFor[big.Int]():       {},
-	reflect.TypeFor[big.Float]():     {},
-	reflect.TypeFor[big.Rat]():       {},
-}
-
 var (
 	textUnmarshalerType   = reflect.TypeFor[encoding.TextUnmarshaler]()
 	binaryUnmarshalerType = reflect.TypeFor[encoding.BinaryUnmarshaler]()
 )
 
 // isLeafStruct reports whether t should be treated as an opaque leaf:
-// either it's in the built-in registry, or *T implements
-// [encoding.TextUnmarshaler] or [encoding.BinaryUnmarshaler]. (*T
-// suffices: Go's method sets promote value-receiver methods.)
+// either it's a built-in leaf the decoder handles without an
+// unmarshaler interface ([time.Location], [net.IPNet]), or *T
+// implements [encoding.TextUnmarshaler] or [encoding.BinaryUnmarshaler]
+// (which covers time.Time, url.URL, regexp.Regexp and math/big's
+// types). *T suffices: Go's method sets promote value-receiver methods.
+// Don't name types that implement those interfaces here: naming a
+// type keeps its methods (and their packages) linked into every program.
 func isLeafStruct(t reflect.Type) bool {
-	if _, ok := builtinLeafStructTypes[t]; ok {
+	if t == timeLocationType || t == netIPNetType {
 		return true
 	}
 	pt := reflect.PointerTo(t)
