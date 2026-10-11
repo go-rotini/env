@@ -24,7 +24,7 @@ func decodeInto[T any](t *testing.T, text string, opts decodeOpts) (T, error) {
 	if err != nil {
 		return zero, err
 	}
-	v, _ := holder.Elem().Interface().(T)
+	v, _ := reflect.TypeAssert[T](holder.Elem())
 	return v, nil
 }
 
@@ -891,7 +891,7 @@ func TestDecode_UnmarshalerContext(t *testing.T) {
 	if err := decodeValue(ctx, holder.Elem(), "y", decodeOpts{}); err != nil {
 		t.Fatalf("decodeValue(*ctxUnmarshaler): %v", err)
 	}
-	p, _ := holder.Elem().Interface().(*ctxUnmarshaler)
+	p, _ := reflect.TypeAssert[*ctxUnmarshaler](holder.Elem())
 	if p == nil || p.got != "y" || !p.sawCtx {
 		t.Errorf("*T UnmarshalerContext: p=%+v", p)
 	}

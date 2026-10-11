@@ -2,6 +2,7 @@ package env
 
 import (
 	"errors"
+	"math/big"
 	"net"
 	"net/url"
 	"reflect"
@@ -388,9 +389,13 @@ func TestCollectStructInfo_BuiltinLeafTypes(t *testing.T) {
 // produce keys like "WALL", "EXT", "LOC" for time.Time).
 type leafTypesUntaggedConfig struct {
 	Stamp time.Time
+	Loc   time.Location
 	URL   url.URL
 	Net   net.IPNet
 	Re    regexp.Regexp
+	Int   big.Int
+	Float big.Float
+	Rat   big.Rat
 }
 
 func TestCollectStructInfo_BuiltinLeafTypesUntagged(t *testing.T) {
@@ -399,7 +404,7 @@ func TestCollectStructInfo_BuiltinLeafTypesUntagged(t *testing.T) {
 		t.Fatalf("unexpected err: %v", info.Err)
 	}
 	keys := fieldKeys(info.Fields)
-	want := []string{"STAMP", "URL", "NET", "RE"}
+	want := []string{"STAMP", "LOC", "URL", "NET", "RE", "INT", "FLOAT", "RAT"}
 	if !slices.Equal(keys, want) {
 		t.Errorf("keys = %v\nwant %v", keys, want)
 	}
@@ -407,8 +412,8 @@ func TestCollectStructInfo_BuiltinLeafTypesUntagged(t *testing.T) {
 
 // customDecodable implements encoding.TextUnmarshaler via a pointer
 // receiver, so the walker's interface-based leaf detection should treat
-// any field of this type as a leaf even though the type isn't in the
-// built-in registry.
+// any field of this type as a leaf even though the type isn't one of the
+// built-in leaves.
 type customDecodable struct {
 	raw string
 }

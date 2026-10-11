@@ -855,8 +855,7 @@ func TestLoader_AnnotateParseError_LeavesNonParseErrorUnchanged(t *testing.T) {
 	if !strings.Contains(err.Error(), "plain error") {
 		t.Errorf("plain error message lost: %v", err)
 	}
-	var pe *ParseError
-	if errors.As(err, &pe) {
+	if _, ok := errors.AsType[*ParseError](err); ok {
 		t.Errorf("plain error was wrapped in *ParseError unexpectedly")
 	}
 }

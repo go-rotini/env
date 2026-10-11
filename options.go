@@ -214,7 +214,7 @@ func WithCustomDecoder[T any](fn func(s string, dst *T) error) Option {
 		}
 		typ := reflect.TypeFor[T]()
 		o.customDecoders[typ] = func(s string, dst reflect.Value) error {
-			ptr, _ := dst.Addr().Interface().(*T)
+			ptr, _ := reflect.TypeAssert[*T](dst.Addr())
 			return fn(s, ptr)
 		}
 	}

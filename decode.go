@@ -83,25 +83,25 @@ func decodeValue(ctx context.Context, dst reflect.Value, text string, opts decod
 	}
 
 	addr := dst.Addr()
-	if uc, ok := addr.Interface().(UnmarshalerContext); ok {
+	if uc, ok := reflect.TypeAssert[UnmarshalerContext](addr); ok {
 		if err := uc.UnmarshalEnv(ctx, text); err != nil {
 			return wrapDecodeErr(dst.Type(), text, err)
 		}
 		return nil
 	}
-	if u, ok := addr.Interface().(Unmarshaler); ok {
+	if u, ok := reflect.TypeAssert[Unmarshaler](addr); ok {
 		if err := u.UnmarshalEnv(text); err != nil {
 			return wrapDecodeErr(dst.Type(), text, err)
 		}
 		return nil
 	}
-	if tu, ok := addr.Interface().(encoding.TextUnmarshaler); ok {
+	if tu, ok := reflect.TypeAssert[encoding.TextUnmarshaler](addr); ok {
 		if err := tu.UnmarshalText([]byte(text)); err != nil {
 			return wrapDecodeErr(dst.Type(), text, err)
 		}
 		return nil
 	}
-	if bu, ok := addr.Interface().(encoding.BinaryUnmarshaler); ok {
+	if bu, ok := reflect.TypeAssert[encoding.BinaryUnmarshaler](addr); ok {
 		if err := bu.UnmarshalBinary([]byte(text)); err != nil {
 			return wrapDecodeErr(dst.Type(), text, err)
 		}
