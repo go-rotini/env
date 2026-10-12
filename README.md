@@ -9,7 +9,7 @@ This package is used as the default environment-variable support package for [ro
 - One-line happy path: `env.Load(&cfg)` is enough for most programs
 - `encoding/json`-shaped API: single comma-separated `env:"NAME,opt1,opt2"` tag, generic `LoadTo[T]` convenience, a configurable `Loader` (the `Decoder`-style entry point) for advanced cases
 - Aggregated multi-error reporting with per-field attribution (`*MultiError`, `FormatError`)
-- Principled `Source` interface: `OSEnv()`, `Map`, `Multi(...)` built in; `.env` parsing via [go-rotini/dotenv](https://github.com/go-rotini/dotenv); remote secret backends in their own modules — all equal citizens
+- Principled `Source` interface: `OSEnv()`, `Map`, `Multi(...)` built in; `.env` parsing via [go-rotini/dotenv](https://github.com/go-rotini/dotenv); any other store (such as a secret manager) plugs in by implementing `Source`
 - `context.Context` support: `LoadContext` threads the context to mutators and to `UnmarshalerContext` / `ValidatorContext` hooks
 - Atomic, lock-free reads on reload via `Live[T]` and `sync/atomic.Pointer`
 - Per-field `immutable` enforcement: reload candidates that change a marked field are rejected (old/new values redacted for `secret` fields)

@@ -1371,3 +1371,30 @@ func TestEncode_MapKeyError(t *testing.T) {
 		t.Errorf("err = %v, want ErrUnsupportedType", err)
 	}
 }
+
+func TestEncode_SecretWrapperRedactedWithoutTag(t *testing.T) {
+	type cfg struct {
+		Token  Secret[string]  `env:"TOKEN"`
+		PToken *Secret[string] `env:"P_TOKEN"`
+	}
+	p := NewSecret("hunter3")
+	v := cfg{Token: NewSecret("hunter2"), PToken: &p}
+	var buf bytes.Buffer
+	if err := Encode(&buf, v); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if strings.Contains(out, "hunter") {
+		t.Fatalf("Encode leaked a Secret value:\n%s", out)
+	}
+	if !strings.Contains(out, "TOKEN=***") || !strings.Contains(out, "P_TOKEN=***") {
+		t.Fatalf("want redacted lines:\n%s", out)
+	}
+	buf.Reset()
+	if err := Encode(&buf, v, WithEncodeIncludeSecrets(true)); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "TOKEN=hunter2") {
+		t.Fatalf("WithEncodeIncludeSecrets lost the value:\n%s", buf.String())
+	}
+}

@@ -146,8 +146,8 @@
 //
 // Encoding (reverse direction):
 //
-//   - [Encode] is a tooling feature, not a primary API. Secret-tagged fields
-//     redact to "***" by default; [WithEncodeIncludeSecrets] opts in.
+//   - [Encode] is a tooling feature, not a primary API. Secret-tagged and
+//     [Secret] fields redact to "***" by default; [WithEncodeIncludeSecrets] opts in.
 //     Encode + Load is byte-stable for canonical inputs but is not a
 //     round-trip for `.env` FILES (comments and original quoting are lost).
 //     For lossless `.env` editing, use github.com/go-rotini/dotenv's Parse →

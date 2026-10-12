@@ -15,16 +15,15 @@ import (
 //   - [slog.LogValuer]: emits the marker, so slog attributes redact
 //     automatically.
 //   - [Marshaler]: returns the underlying T for the reverse [Encode]
-//     path, so [Encode] writes the plain value unless the field is also
-//     secret-tagged (which writes "***" unless
-//     [WithEncodeIncludeSecrets] is set).
+//     path. [Encode] writes a Secret field as "***" unless
+//     [WithEncodeIncludeSecrets] is set.
 //   - [Unmarshaler]: decodes via the standard decoder pipeline; works
 //     for any T the decoder accepts.
 //
 // The wrapper redacts the loaded value wherever it is printed or
-// logged; the secret tag option redacts the field in [*ParseError] and
-// [Encode] output and marks it secret in [Describe]. Use both for full
-// coverage:
+// logged, and [Encode] and [Describe] treat a Secret field as
+// secret-tagged. Only the secret tag option redacts the raw input in a
+// [*ParseError]. Use both for full coverage:
 //
 //	type Config struct {
 //	    Token env.Secret[string] `env:"TOKEN,required,secret"`
@@ -84,3 +83,16 @@ func (s *Secret[T]) UnmarshalEnv(text string) error {
 // secretMarker is intentionally distinct from the encoder's "***" so
 // wrapper-redacted values stay distinguishable in logs.
 const secretMarker = "<redacted>"
+
+// isEnvSecret marks Secret[T] for [isSecretType].
+func (Secret[T]) isEnvSecret() {}
+
+// isSecretType reports whether t, after dereferencing pointers, is a
+// [Secret] instantiation. Such fields are treated as secret-tagged by
+// [Encode] and [Describe].
+func isSecretType(t reflect.Type) bool {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	return t.Implements(reflect.TypeFor[interface{ isEnvSecret() }]())
+}

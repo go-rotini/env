@@ -22,17 +22,21 @@ type FieldDoc struct {
 	Description string
 
 	// Default is the literal default value from the default= tag option,
-	// not redacted for secret fields. Empty when no default is set.
+	// passed through the loader's secret redactor (see
+	// [WithSecretRedactor]) when Secret is true. Empty when no default
+	// is set.
 	Default string
 
-	// Required is true when the field carries the required tag option.
-	// [WithRequireAll] does not set it.
+	// Required is true when the field carries the required tag option,
+	// or when the loader uses [WithRequireAll] and the field has no
+	// default.
 	Required bool
 
 	// NotEmpty is true when the field carries the notEmpty tag option.
 	NotEmpty bool
 
-	// Secret is true when the field carries the secret tag option.
+	// Secret is true when the field carries the secret tag option or
+	// its type is a [Secret].
 	Secret bool
 
 	// Immutable is true when the field carries the immutable tag option.
@@ -144,14 +148,19 @@ func (l *Loader) buildFieldDocs(t reflect.Type, info *structInfo) []FieldDoc {
 	docs := make([]FieldDoc, 0, len(info.Fields))
 	for _, fd := range info.Fields {
 		field := t.FieldByIndex(fd.Index)
+		secret := fd.Secret || isSecretType(field.Type)
+		def := fd.DefaultValue
+		if secret && fd.HasDefault {
+			def = l.redactor()(def)
+		}
 		docs = append(docs, FieldDoc{
 			Name:        l.opts.prefix + fd.Key,
 			GoType:      field.Type.String(),
 			Description: fd.Description,
-			Default:     fd.DefaultValue,
-			Required:    fd.Required,
+			Default:     def,
+			Required:    fd.Required || (l.opts.requireAll && !fd.HasDefault),
 			NotEmpty:    fd.NotEmpty,
-			Secret:      fd.Secret,
+			Secret:      secret,
 			Immutable:   fd.Immutable,
 			Separator:   fd.Separator,
 		})

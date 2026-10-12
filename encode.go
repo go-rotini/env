@@ -48,7 +48,7 @@ func WithEncodeExport(b bool) EncodeOption {
 }
 
 // WithEncodeIncludeSecrets emits the underlying value of secret-tagged
-// fields instead of the `***` marker. Use only when the destination is
+// and [Secret] fields instead of the `***` marker. Use only when the destination is
 // known to be safe (e.g., piping to a child process via inherited env,
 // not when writing to a public file).
 func WithEncodeIncludeSecrets(b bool) EncodeOption {
@@ -88,9 +88,8 @@ func WithCustomMarshaler[T any](fn func(T) (string, error)) EncodeOption {
 // Encode writes v to w as a `.env`-format byte stream. Each field
 // [Load] would fill becomes one line, `KEY=VALUE`, preceded by its
 // envDesc text as `#` comments. Nil pointer fields and nil slice/map
-// fields are omitted. Secret-tagged fields are written as "***" unless
-// [WithEncodeIncludeSecrets] is set; a [Secret] field without the tag
-// is written in plain text.
+// fields are omitted. Secret-tagged fields and [Secret] fields are
+// written as "***" unless [WithEncodeIncludeSecrets] is set.
 //
 // v may be a struct value or a non-nil pointer to one. Output is
 // sourceable by Bash (with [WithEncodeExport]) and re-parseable by the
@@ -241,7 +240,7 @@ func (e *encoder) encodeField(root reflect.Value, fd fieldDescriptor) error {
 		text string
 		err  error
 	)
-	if fd.Secret && !e.opts.includeSecrets {
+	if (fd.Secret || isSecretType(field.Type())) && !e.opts.includeSecrets {
 		text = "***"
 	} else {
 		text, err = e.renderValue(field, fd)

@@ -173,18 +173,25 @@ func TestSecret_UnmarshalEnv_ParseError(t *testing.T) {
 	}
 }
 
-// --- encoder integration: MarshalEnv (when secret tag is NOT set) ---
+// --- encoder integration: Secret without the secret tag ---
 
 type secretWrapperConfig struct {
 	Token Secret[string] `env:"TOKEN"`
 }
 
 func TestSecret_Encode_WithoutSecretTag(t *testing.T) {
-	// Without the secret tag, the encoder calls MarshalEnv on the
-	// wrapper, which renders the inner T's value via fmt.Sprint.
+	// A Secret field is redacted even without the secret tag;
+	// WithEncodeIncludeSecrets writes the MarshalEnv value.
 	c := secretWrapperConfig{Token: NewSecret("the-real-token")}
 	var buf bytes.Buffer
 	if err := Encode(&buf, c); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "TOKEN=***") {
+		t.Errorf("expected redaction:\n%s", buf.String())
+	}
+	buf.Reset()
+	if err := Encode(&buf, c, WithEncodeIncludeSecrets(true)); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(buf.String(), "TOKEN=the-real-token") {

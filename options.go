@@ -128,7 +128,7 @@ func WithFieldNameTransform(fn func(goFieldName string) string) Option {
 
 // WithRequireAll inverts the default optional-by-default policy: every
 // field becomes required unless it has a default= tag option.
-// [FieldDoc.Required] does not reflect it.
+// [FieldDoc.Required] reflects it.
 func WithRequireAll() Option {
 	return func(o *loaderOptions) {
 		o.requireAll = true
@@ -154,7 +154,8 @@ func WithMutator(m ...Mutator) Option {
 
 // WithSecretRedactor overrides the redaction function applied to
 // secret-tagged field values in [*ParseError] and
-// [*ImmutableChangedError]. The default returns "<redacted: N bytes>"
+// [*ImmutableChangedError], and to secret fields' defaults in
+// [Describe], [PrintUsage] and [Markdown]. The default returns "<redacted: N bytes>"
 // (or "<redacted>" for empty). Pass nil to restore the default. The
 // encoder's separate "***" marker is unaffected.
 func WithSecretRedactor(fn func(value string) string) Option {
