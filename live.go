@@ -35,6 +35,7 @@ func NewLive[T any](opts ...Option) (*Live[T], error) {
 }
 
 // NewLiveWithLoader is like [NewLive] but uses an existing [*Loader].
+// A nil l returns [ErrNilPointer].
 func NewLiveWithLoader[T any](l *Loader) (*Live[T], error) {
 	if l == nil {
 		return nil, ErrNilPointer
@@ -109,8 +110,9 @@ func (l *Live[T]) Events() <-chan Event {
 }
 
 // Reload triggers a synchronous reload through the worker, bypassing
-// the debounce timer. Returns the reload error (validation,
-// immutable, decode) or nil on success.
+// the debounce timer, and delivers its [Event] like any other reload.
+// Returns the reload error (validation, immutable, decode), nil on
+// success, or [ErrWatcherClosed] after [Live.Close].
 func (l *Live[T]) Reload() error {
 	return l.eng.requestReload()
 }

@@ -16,7 +16,7 @@ type Loader struct {
 }
 
 // New returns a [Loader] with opts applied to the defaults: source
-// chain = [[OSEnv]], no prefix, tag name "env", SCREAMING_SNAKE_CASE
+// chain of [OSEnv] alone, no prefix, tag name "env", SCREAMING_SNAKE_CASE
 // field-name transform, no logger, optional-by-default field policy.
 func New(opts ...Option) *Loader {
 	o := defaultLoaderOptions()

@@ -9,7 +9,7 @@ import (
 
 // Source provides string-keyed value lookups. It is the primary contract by
 // which the loader resolves env-var values: the OS environment is just one
-// source, and `.env` files, in-memory maps, and remote secret backends all
+// source, and `.env` files, in-memory maps, and custom backends all
 // implement the same interface.
 //
 // Implementations MUST make Lookup safe for concurrent use. All built-in
@@ -36,11 +36,10 @@ type Watcher interface {
 	Watch(ctx context.Context) (<-chan Change, error)
 }
 
-// Change describes a Source-level change. Keys is the set of variable names
-// that were added, modified, or removed since the last event. An empty Keys
-// slice means "the source signaled a change but did not identify which
-// keys"; the loader treats this as "everything may have changed" and
-// re-reads all fields on the next reload.
+// Change describes a Source-level change. Keys may list the variable names
+// that were added, modified, or removed since the last event, or be empty
+// when the source cannot tell. The loader does not use Keys: every reload
+// re-reads all fields.
 type Change struct {
 	Keys []string
 }
@@ -48,8 +47,8 @@ type Change struct {
 // OSEnv returns a Source backed by [os.LookupEnv]. The source is
 // stateless and reflects the live process environment on every Lookup.
 //
-// On Windows, [os.LookupEnv] folds variable names to uppercase for
-// comparison; on POSIX systems names are case-sensitive.
+// On Windows, [os.LookupEnv] matches variable names case-insensitively;
+// on POSIX systems names are case-sensitive.
 //
 // Lookup rejects degenerate keys (empty, leading "=", containing "="
 // or NUL) without consulting the OS, so callers passing such keys
@@ -76,9 +75,9 @@ type mapOptions struct {
 }
 
 // WithCaseInsensitive returns a [MapOption] that makes the [Map] source
-// fold ASCII keys to uppercase for comparison, mirroring Windows env-var
-// semantics. Useful in cross-platform tests that need to exercise the
-// Windows case-folding behavior on a POSIX host.
+// fold ASCII keys to uppercase for comparison, approximating Windows
+// env-var semantics. Useful in cross-platform tests that need to exercise
+// case-insensitive lookup on a POSIX host.
 //
 // Folding is ASCII-only; non-ASCII bytes pass through unchanged.
 func WithCaseInsensitive() MapOption {

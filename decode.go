@@ -56,7 +56,7 @@ var (
 //
 //  1. Pointer auto-init: nil pointers are allocated; empty text on a
 //     pointer leaves the pointee at its zero value.
-//  2. Tag-option overrides (time.Time + layout=, []byte + base64=/hex=).
+//  2. Tag-option overrides (time.Time + layout=, []byte + base64/hex).
 //  3. [UnmarshalerContext] (UnmarshalEnv(ctx, s)).
 //  4. [Unmarshaler] (UnmarshalEnv(s)).
 //  5. [encoding.TextUnmarshaler] (UnmarshalText).

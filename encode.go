@@ -71,7 +71,7 @@ func WithEncodeSort(b bool) EncodeOption {
 // WithCustomMarshaler registers a custom marshaler for type T. Runs at
 // the top of the encoder priority chain, ahead of [Marshaler],
 // [encoding.TextMarshaler], [encoding.BinaryMarshaler], and the
-// built-in registry.
+// built-in encoders.
 func WithCustomMarshaler[T any](fn func(T) (string, error)) EncodeOption {
 	return func(o *encoderOptions) {
 		if o.customMarshalers == nil {
@@ -85,9 +85,12 @@ func WithCustomMarshaler[T any](fn func(T) (string, error)) EncodeOption {
 	}
 }
 
-// Encode writes v to w as a `.env`-format byte stream. Each exported,
-// env-tagged field becomes one line: `KEY=VALUE`. Nil pointer fields
-// and nil slice/map fields are omitted.
+// Encode writes v to w as a `.env`-format byte stream. Each field
+// [Load] would fill becomes one line, `KEY=VALUE`, preceded by its
+// envDesc text as `#` comments. Nil pointer fields and nil slice/map
+// fields are omitted. Secret-tagged fields are written as "***" unless
+// [WithEncodeIncludeSecrets] is set; a [Secret] field without the tag
+// is written in plain text.
 //
 // v may be a struct value or a non-nil pointer to one. Output is
 // sourceable by Bash (with [WithEncodeExport]) and re-parseable by the
@@ -283,7 +286,7 @@ func (e *encoder) encodeField(root reflect.Value, fd fieldDescriptor) error {
 //
 //  1. Custom marshaler from [WithCustomMarshaler].
 //  2. Tag overrides: time.Time + layout= → t.Format(layout); []byte /
-//     [N]byte + base64=/hex= → encoded form.
+//     [N]byte + base64/hex → encoded form.
 //  3. [Marshaler] (MarshalEnv).
 //  4. [encoding.TextMarshaler].
 //  5. [encoding.BinaryMarshaler].

@@ -21,12 +21,12 @@ type FieldDoc struct {
 	// Description is the free-text help string from the envDesc tag.
 	Description string
 
-	// Default is the literal default value from the default= tag option.
-	// Empty when no default is set.
+	// Default is the literal default value from the default= tag option,
+	// not redacted for secret fields. Empty when no default is set.
 	Default string
 
-	// Required is true when the field carries the required tag option,
-	// or implicitly required under [WithRequireAll].
+	// Required is true when the field carries the required tag option.
+	// [WithRequireAll] does not set it.
 	Required bool
 
 	// NotEmpty is true when the field carries the notEmpty tag option.
@@ -52,7 +52,9 @@ func Describe(v any, opts ...Option) []FieldDoc {
 }
 
 // PrintUsage writes a column-aligned table of v's loadable fields to
-// w. Suitable for `myapp --env-help`-style output.
+// w: name, type, default (truncated to 40 bytes), required, and
+// description. Suitable for `myapp --env-help`-style output. Writes
+// nothing for a struct with no loadable fields.
 func PrintUsage(w io.Writer, v any, opts ...Option) error {
 	return New(opts...).PrintUsage(w, v)
 }
@@ -88,7 +90,9 @@ func (l *Loader) PrintUsage(w io.Writer, v any) error {
 	return printUsageTable(w, docs)
 }
 
-// Markdown is the [Loader]-method form of [Markdown].
+// Markdown is the [Loader]-method form of [Markdown]. Returns an error
+// when v is not a struct, struct tags fail to validate, or writing
+// fails.
 func (l *Loader) Markdown(w io.Writer, v any) error {
 	docs, err := l.docsOrError(v)
 	if err != nil {

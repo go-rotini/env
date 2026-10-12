@@ -15,17 +15,19 @@ import (
 //   - [slog.LogValuer]: emits the marker, so slog attributes redact
 //     automatically.
 //   - [Marshaler]: returns the underlying T for the reverse [Encode]
-//     path. The encoder's secret-tag check normally redacts to "***"
-//     first; MarshalEnv runs only under [WithEncodeIncludeSecrets].
+//     path, so [Encode] writes the plain value unless the field is also
+//     secret-tagged (which writes "***" unless
+//     [WithEncodeIncludeSecrets] is set).
 //   - [Unmarshaler]: decodes via the standard decoder pipeline; works
 //     for any T the decoder accepts.
 //
-// The wrapper and the secret tag option are interchangeable for
-// redaction purposes:
+// The wrapper redacts the loaded value wherever it is printed or
+// logged; the secret tag option redacts the field in [*ParseError] and
+// [Encode] output and marks it secret in [Describe]. Use both for full
+// coverage:
 //
 //	type Config struct {
-//	    Token env.Secret[string] `env:"TOKEN,required"`
-//	    Other string             `env:"OTHER,required,secret"`
+//	    Token env.Secret[string] `env:"TOKEN,required,secret"`
 //	}
 type Secret[T any] struct {
 	v T

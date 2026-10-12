@@ -30,8 +30,8 @@ type Event struct {
 // goroutine has already exited.
 var ErrWatcherClosed = errors.New("env: watcher closed")
 
-// ErrNilContext is returned when a watch / load call receives a nil
-// context.
+// ErrNilContext is returned when [Loader.LoadContext] or [Loader.Watch]
+// receives a nil context.
 var ErrNilContext = errors.New("env: nil context")
 
 // Watch starts live reload. v must be a non-nil pointer to a struct

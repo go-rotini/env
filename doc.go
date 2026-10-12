@@ -25,8 +25,8 @@
 //
 // All lookups go through the [Source] interface. The OS environment is just
 // one source; `.env` files (via the separate github.com/go-rotini/dotenv
-// package), in-memory maps ([Map]), source chains ([Multi]), and remote
-// secret backends (in their own modules) are equal citizens.
+// package), in-memory maps ([Map]), source chains ([Multi]), and any
+// custom [Source] are equal citizens.
 //
 //	loader := env.New(
 //	    env.WithSource(env.OSEnv()),
@@ -90,9 +90,9 @@
 //
 // OS-level:
 //
-//   - Windows folds env-var names to uppercase; POSIX is case-sensitive. The
-//     [OSEnv] source matches the platform — for cross-platform tests, use
-//     [Map] with [WithCaseInsensitive].
+//   - Windows matches env-var names case-insensitively; POSIX is
+//     case-sensitive. The [OSEnv] source matches the platform — for
+//     cross-platform tests, use [Map] with [WithCaseInsensitive].
 //   - [os.Getenv] collapses unset and empty into "". The [Source] interface
 //     preserves the distinction via the second bool return; [OSEnv] uses
 //     [os.LookupEnv] to honor it. The `required` tag option is satisfied by
@@ -141,7 +141,7 @@
 // Test isolation:
 //
 //   - Global [os.Environ] is shared state; tests that set it are NOT
-//     parallel-safe even via [testing.T.SetEnv]. For parallelizable tests,
+//     parallel-safe even via [testing.T.Setenv]. For parallelizable tests,
 //     prefer [Map] over [OSEnv] as the loader's source.
 //
 // Encoding (reverse direction):
@@ -158,6 +158,5 @@
 //   - This package has zero third-party runtime dependencies and no
 //     sub-packages. `.env` parsing is in github.com/go-rotini/dotenv (also
 //     dependency-free); file watching is in github.com/go-rotini/fs.
-//     Consumers who only need OSEnv + Map pay no transitive cost. Verified
-//     by `go list -deps`.
+//     Consumers who only need OSEnv + Map pay no transitive cost.
 package env
