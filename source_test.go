@@ -324,3 +324,13 @@ func TestAsciiUpper_NoFoldShortCircuit(t *testing.T) {
 		t.Errorf("asciiUpper(%q) = %q, want unchanged", in, got)
 	}
 }
+
+func TestMap_CaseInsensitiveWinnerIsDeterministic(t *testing.T) {
+	t.Parallel()
+	m := map[string]string{"PATH": "upper", "Path": "title", "path": "lower"}
+	for range 50 {
+		if v, _ := Map(m, WithCaseInsensitive()).Lookup("PATH"); v != "lower" {
+			t.Fatalf("Lookup = %q, want lower (greatest key wins)", v)
+		}
+	}
+}

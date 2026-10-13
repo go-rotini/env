@@ -1,9 +1,13 @@
 package env_test
 
 import (
+	"bytes"
+	"errors"
 	"net"
 	"net/url"
+	"reflect"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -136,4 +140,80 @@ func FuzzDecode(f *testing.F) {
 			_ = loader.Load(target)
 		}
 	})
+}
+
+// FuzzEncodeRoundTrip checks that whatever Encode writes loads back as
+// the same value (or that Encode refuses it).
+func FuzzEncodeRoundTrip(f *testing.F) {
+	f.Add("hello world", "a", "b", uint8(2))
+	f.Add("a\"b\\c$d`e\n", "x,y", "k:v", uint8(2))
+	f.Add("x", "", "b", uint8(1))
+	f.Fuzz(func(t *testing.T, s, a, b string, n uint8) {
+		if len(s)+len(a)+len(b) > 1024 {
+			return
+		}
+		type C struct {
+			S string            `env:"S"`
+			L []string          `env:"L"`
+			M map[string]string `env:"M"`
+		}
+		// n picks the slice length (0-3) and whether the map is empty.
+		in := C{S: s, L: []string{a, b, a}[:n%4], M: map[string]string{}}
+		if n&4 == 0 {
+			in.M[a] = b
+		}
+		var buf bytes.Buffer
+		if err := env.Encode(&buf, &in, env.WithEncodeSort(true)); err != nil {
+			if errors.Is(err, env.ErrSeparatorInValue) {
+				return
+			}
+			t.Fatal(err)
+		}
+		vals := make(map[string]string)
+		for line := range strings.SplitSeq(strings.TrimSuffix(buf.String(), "\n"), "\n") {
+			k, v, _ := strings.Cut(line, "=")
+			vals[k] = unquoteEncoded(t, v)
+		}
+		var out C
+		if err := env.New(env.WithSource(env.Map(vals))).Load(&out); err != nil {
+			t.Fatalf("load %q: %v", buf.String(), err)
+		}
+		if !reflect.DeepEqual(in, out) {
+			t.Fatalf("round trip %#v -> %q -> %#v", in, buf.String(), out)
+		}
+	})
+}
+
+// unquoteEncoded reverses Encode's double-quoting.
+func unquoteEncoded(t *testing.T, v string) string {
+	t.Helper()
+	if !strings.HasPrefix(v, `"`) {
+		return v
+	}
+	v = v[1 : len(v)-1]
+	var b strings.Builder
+	for i := 0; i < len(v); i++ {
+		if v[i] != '\\' {
+			b.WriteByte(v[i])
+			continue
+		}
+		i++
+		switch v[i] {
+		case 'n':
+			b.WriteByte('\n')
+		case 'r':
+			b.WriteByte('\r')
+		case 't':
+			b.WriteByte('\t')
+		case 'b':
+			b.WriteByte('\b')
+		case 'f':
+			b.WriteByte('\f')
+		case '"', '\\', '$':
+			b.WriteByte(v[i])
+		default:
+			t.Fatalf("unknown escape \\%c", v[i])
+		}
+	}
+	return b.String()
 }

@@ -5,13 +5,15 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
+	"slices"
 )
 
 // Secret is a generic wrapper that hides T's value in textual output
 // and integrates with the standard observability surfaces:
 //
-//   - [fmt.Stringer], [fmt.GoStringer]: return the redaction marker, so
-//     fmt.Println / %v / %#v emit the marker, never the value.
+//   - [fmt.Formatter], [fmt.Stringer], [fmt.GoStringer]: write the
+//     redaction marker for every fmt verb (%v, %#v, %d, %t, ...), never
+//     the value.
 //   - [slog.LogValuer]: emits the marker, so slog attributes redact
 //     automatically.
 //   - [Marshaler]: returns the underlying T for the reverse [Encode]
@@ -21,12 +23,18 @@ import (
 //     for any T the decoder accepts.
 //
 // The wrapper redacts the loaded value wherever it is printed or
-// logged, and [Encode] and [Describe] treat a Secret field as
-// secret-tagged. Only the secret tag option redacts the raw input in a
-// [*ParseError]. Use both for full coverage:
+// logged, as long as fmt can call its methods: fmt cannot reach the
+// methods of a value in an unexported struct field, so it prints such a
+// field's contents by reflection. Keep Secret fields exported.
+//
+// The field's tag options apply to T: base64/hex on a Secret[[]byte],
+// layout= on a Secret[time.Time], separator= on a Secret[[]string]. A
+// field whose type is Secret[T], or a slice, array or map of
+// Secret[T], is treated as secret-tagged everywhere: [Encode],
+// [Describe], [*ParseError] and [*ImmutableChangedError] redact it.
 //
 //	type Config struct {
-//	    Token env.Secret[string] `env:"TOKEN,required,secret"`
+//	    Token env.Secret[string] `env:"TOKEN,required"`
 //	}
 type Secret[T any] struct {
 	v T
@@ -54,6 +62,18 @@ func (s Secret[T]) GoString() string {
 	return secretMarker
 }
 
+// Format implements [fmt.Formatter] and writes the redaction marker
+// for every verb, honoring width and flags. %q quotes the marker and
+// %x/%X hex-encode it, as for a string.
+func (s Secret[T]) Format(f fmt.State, verb rune) {
+	switch verb {
+	case 'q', 'x', 'X':
+		_, _ = fmt.Fprintf(f, fmt.FormatString(f, verb), secretMarker)
+	default:
+		_, _ = fmt.Fprintf(f, fmt.FormatString(f, 's'), secretMarker)
+	}
+}
+
 // LogValue implements [slog.LogValuer] and returns the redaction
 // marker.
 func (s Secret[T]) LogValue() slog.Value {
@@ -74,10 +94,26 @@ func (s Secret[T]) MarshalEnv() (string, error) {
 }
 
 // UnmarshalEnv implements [Unmarshaler] by delegating to the package's
-// decoder against the inner T. If T relies on [UnmarshalerContext], it
-// receives context.Background() (the wrapper has no context to thread).
+// decoder against the inner T. Called directly, it applies no tag
+// options and gives an [UnmarshalerContext] T context.Background(); the
+// loader instead decodes T with the field's options and context.
 func (s *Secret[T]) UnmarshalEnv(text string) error {
 	return decodeValue(context.Background(), reflect.ValueOf(&s.v).Elem(), text, decodeOpts{})
+}
+
+// secretCodec lets the decoder and encoder reach a Secret's T with the
+// field's tag options.
+type secretCodec interface {
+	decodeSecret(ctx context.Context, text string, opts decodeOpts) error
+	renderSecret(e *encoder, fd fieldDescriptor) (string, error)
+}
+
+func (s *Secret[T]) decodeSecret(ctx context.Context, text string, opts decodeOpts) error {
+	return decodeValue(ctx, reflect.ValueOf(&s.v).Elem(), text, opts)
+}
+
+func (s *Secret[T]) renderSecret(e *encoder, fd fieldDescriptor) (string, error) {
+	return e.renderValue(reflect.ValueOf(&s.v).Elem(), fd)
 }
 
 // secretMarker is intentionally distinct from the encoder's "***" so
@@ -87,12 +123,30 @@ const secretMarker = "<redacted>"
 // isEnvSecret marks Secret[T] for [isSecretType].
 func (Secret[T]) isEnvSecret() {}
 
-// isSecretType reports whether t, after dereferencing pointers, is a
-// [Secret] instantiation. Such fields are treated as secret-tagged by
-// [Encode] and [Describe].
+// isSecretType reports whether t is a [Secret] instantiation, looking
+// through pointers and slice, array and map element (and map key)
+// types. Fields of such types are treated as secret-tagged.
 func isSecretType(t reflect.Type) bool {
-	for t.Kind() == reflect.Pointer {
-		t = t.Elem()
+	return secretTypeSeen(t, nil)
+}
+
+// secretTypeSeen is isSecretType with a record of the container types
+// already visited, so self-referencing types (type Tree map[string]Tree)
+// terminate.
+func secretTypeSeen(t reflect.Type, seen []reflect.Type) bool {
+	for {
+		switch t.Kind() {
+		case reflect.Pointer, reflect.Slice, reflect.Array, reflect.Map:
+			if slices.Contains(seen, t) {
+				return false
+			}
+			seen = append(seen, t)
+			if t.Kind() == reflect.Map && secretTypeSeen(t.Key(), seen) {
+				return true
+			}
+			t = t.Elem()
+			continue
+		}
+		return t.Implements(reflect.TypeFor[interface{ isEnvSecret() }]())
 	}
-	return t.Implements(reflect.TypeFor[interface{ isEnvSecret() }]())
 }

@@ -3,10 +3,12 @@ package env
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -838,25 +840,43 @@ func TestLoader_AnnotateParseError_FillsEmptyFields(t *testing.T) {
 	}
 }
 
-func TestLoader_AnnotateParseError_LeavesNonParseErrorUnchanged(t *testing.T) {
-	// A custom decoder that returns a NON-ParseError. annotateParseError
-	// should pass it through unchanged (not wrapped in a new ParseError).
+func TestLoader_CustomDecoderErrorWrappedInParseError(t *testing.T) {
+	plain := errors.New("plain error")
 	loader := New(
 		WithSource(Map(map[string]string{"X": "x"})),
 		WithCustomDecoder(func(_ string, _ *customDecodeReturnsBareErr) error {
-			return errors.New("plain error")
+			return plain
 		}),
 	)
 	var cfg cfgWithBarePEDecoder
 	err := loader.Load(&cfg)
-	if err == nil {
-		t.Fatal("expected error")
+	pe, ok := errors.AsType[*ParseError](err)
+	if !ok {
+		t.Fatalf("want *ParseError, got %v", err)
 	}
-	if !strings.Contains(err.Error(), "plain error") {
-		t.Errorf("plain error message lost: %v", err)
+	if pe.Key != "X" || pe.Field == "" || !errors.Is(err, plain) {
+		t.Errorf("missing context or cause: %+v", pe)
 	}
-	if _, ok := errors.AsType[*ParseError](err); ok {
-		t.Errorf("plain error was wrapped in *ParseError unexpectedly")
+}
+
+type secretCustomDecoded struct{}
+
+func TestLoader_CustomDecoderErrorRedactedForSecret(t *testing.T) {
+	loader := New(
+		WithSource(Map(map[string]string{"API_PORT": "topsecret"})),
+		WithCustomDecoder(func(s string, _ *secretCustomDecoded) error {
+			return fmt.Errorf("bad port %q", s)
+		}),
+	)
+	var cfg struct {
+		Port secretCustomDecoded `env:"API_PORT,secret"`
+	}
+	err := loader.Load(&cfg)
+	if err == nil || strings.Contains(err.Error(), "topsecret") {
+		t.Fatalf("secret leaked or no error: %v", err)
+	}
+	if !errors.Is(err, ErrParse) {
+		t.Errorf("want ErrParse, got %v", err)
 	}
 }
 
@@ -971,5 +991,117 @@ func TestLoadContext_NilContext(t *testing.T) {
 	var nilCtx context.Context // intentional: exercises the nil-ctx guard
 	if err := loader.LoadContext(nilCtx, &c); !errors.Is(err, ErrNilContext) {
 		t.Errorf("LoadContext(nil, ...) = %v, want ErrNilContext", err)
+	}
+}
+
+type unexportedInner struct{ Port int }
+
+func TestLoader_NilEmbeddedPointerToUnexportedStruct(t *testing.T) {
+	t.Parallel()
+	var c struct {
+		*unexportedInner
+	}
+	err := New(WithSource(Map(map[string]string{"PORT": "1"}))).Load(&c)
+	if !errors.Is(err, ErrUnsupportedType) {
+		t.Fatalf("Load = %v, want ErrUnsupportedType", err)
+	}
+	c.unexportedInner = &unexportedInner{}
+	if err := New(WithSource(Map(map[string]string{"PORT": "1"}))).Load(&c); err != nil || c.Port != 1 {
+		t.Fatalf("preallocated embed: %v, Port=%d", err, c.Port)
+	}
+}
+
+func TestLoader_DoublePointerStruct(t *testing.T) {
+	t.Parallel()
+	type inner struct{ Port int }
+	var c struct{ In **inner }
+	if err := New(WithSource(Map(map[string]string{"PORT": "7"}))).Load(&c); err != nil {
+		t.Fatal(err)
+	}
+	if c.In == nil || *c.In == nil || (*c.In).Port != 7 {
+		t.Fatalf("In not filled: %+v", c.In)
+	}
+	var buf strings.Builder
+	if err := Encode(&buf, &c); err != nil || buf.String() != "PORT=7\n" {
+		t.Errorf("Encode = %q, %v", buf.String(), err)
+	}
+	if docs := Describe(&c); len(docs) != 1 || docs[0].Name != "PORT" || docs[0].GoType != "int" {
+		t.Errorf("Describe = %+v", docs)
+	}
+	var usage strings.Builder
+	if err := PrintUsage(&usage, &c); err != nil || !strings.Contains(usage.String(), "PORT") {
+		t.Errorf("PrintUsage = %q, %v", usage.String(), err)
+	}
+}
+
+func TestLoader_SecretTypeParseErrorRedacted(t *testing.T) {
+	t.Parallel()
+	var c struct {
+		N     Secret[int]   `env:"N"`
+		Many  []Secret[int] `env:"MANY"`
+		Plain int           `env:"PLAIN"`
+	}
+	err := New(WithSource(Map(map[string]string{"N": "hunter2", "MANY": "1,hunter3"}))).Load(&c)
+	if err == nil || strings.Contains(err.Error(), "hunter") {
+		t.Fatalf("Load = %v", err)
+	}
+}
+
+func TestLoader_UnsetOnDecodeFailure(t *testing.T) {
+	t.Setenv("ENV_TEST_UNSET_BAD", "not-a-number")
+	var c struct {
+		N int `env:"ENV_TEST_UNSET_BAD,unset,secret"`
+	}
+	if err := New().Load(&c); err == nil {
+		t.Fatal("want parse error")
+	}
+	if _, ok := os.LookupEnv("ENV_TEST_UNSET_BAD"); ok {
+		t.Error("variable left in the environment after a failed decode")
+	}
+}
+
+func TestLoader_UnsetLeavesUnrelatedOSVariable(t *testing.T) {
+	t.Setenv("ENV_TEST_UNSET_SHADOW", "from-os")
+	var c struct {
+		V string `env:"ENV_TEST_UNSET_SHADOW,unset"`
+	}
+	src := Multi(Map(map[string]string{"ENV_TEST_UNSET_SHADOW": "from-file"}), OSEnv())
+	if err := New(WithSource(src)).Load(&c); err != nil || c.V != "from-file" {
+		t.Fatalf("Load = %v, V=%q", err, c.V)
+	}
+	if v := os.Getenv("ENV_TEST_UNSET_SHADOW"); v != "from-os" {
+		t.Errorf("OS variable = %q, want it left alone", v)
+	}
+}
+
+func TestLoader_FromFileErrorKeepsCause(t *testing.T) {
+	t.Parallel()
+	var c struct {
+		V string `env:"V,fromFile"`
+	}
+	err := New(WithSource(Map(map[string]string{"V": filepath.Join(t.TempDir(), "missing")}))).Load(&c)
+	if !errors.Is(err, ErrFromFileRead) || !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("Load = %v, want ErrFromFileRead and fs.ErrNotExist", err)
+	}
+}
+
+func TestLoader_PerLoaderFieldCache(t *testing.T) {
+	t.Parallel()
+	var calls int
+	var mu sync.Mutex
+	l := New(WithPrefix("APP_"), WithSource(Map(map[string]string{"APP_PORT": "1"})), WithFieldNameTransform(func(s string) string {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		return strings.ToUpper(s)
+	}))
+	for range 3 {
+		var c struct{ Port int }
+		if err := l.Load(&c); err != nil || c.Port != 1 {
+			t.Fatalf("Load = %v, %+v", err, c)
+		}
+	}
+	if calls != 1 {
+		t.Errorf("transform called %d times, want 1 (walk cached per loader)", calls)
 	}
 }

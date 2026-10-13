@@ -43,10 +43,11 @@ func decodeOptsFromDescriptor(d fieldDescriptor) decodeOpts {
 // regexp.Regexp's pointer receiver implements TextUnmarshaler since
 // Go 1.21, so the interface chain handles it for free.
 var (
-	timeTimeType     = reflect.TypeFor[time.Time]()
-	timeDurationType = reflect.TypeFor[time.Duration]()
-	timeLocationType = reflect.TypeFor[time.Location]()
-	netIPNetType     = reflect.TypeFor[net.IPNet]()
+	timeTimeType        = reflect.TypeFor[time.Time]()
+	timeDurationType    = reflect.TypeFor[time.Duration]()
+	timeLocationType    = reflect.TypeFor[time.Location]()
+	timeLocationPtrType = reflect.TypeFor[*time.Location]()
+	netIPNetType        = reflect.TypeFor[net.IPNet]()
 )
 
 // decodeValue decodes text into dst, which must be settable and
@@ -56,7 +57,8 @@ var (
 //
 //  1. Pointer auto-init: nil pointers are allocated; empty text on a
 //     pointer leaves the pointee at its zero value.
-//  2. Tag-option overrides (time.Time + layout=, []byte + base64/hex).
+//  2. [Secret]: T decoded with the same options; tag-option overrides
+//     (time.Time + layout=, []byte + base64/hex).
 //  3. [UnmarshalerContext] (UnmarshalEnv(ctx, s)).
 //  4. [Unmarshaler] (UnmarshalEnv(s)).
 //  5. [encoding.TextUnmarshaler] (UnmarshalText).
@@ -65,6 +67,17 @@ var (
 //     []byte/[N]byte default raw form.
 //  8. Default reflection (primitives, slices, arrays, maps).
 func decodeValue(ctx context.Context, dst reflect.Value, text string, opts decodeOpts) error {
+	// A *time.Location must point at the Location LoadLocation returns:
+	// time.Local fills its zone data lazily through that exact pointer,
+	// and time.UTC is compared by identity.
+	if dst.Type() == timeLocationPtrType && text != "" {
+		loc, err := time.LoadLocation(text)
+		if err != nil {
+			return wrapDecodeErr(timeLocationType, text, err)
+		}
+		dst.Set(reflect.ValueOf(loc))
+		return nil
+	}
 	for dst.Kind() == reflect.Pointer {
 		if dst.IsNil() {
 			dst.Set(reflect.New(dst.Type().Elem()))
@@ -75,6 +88,12 @@ func decodeValue(ctx context.Context, dst reflect.Value, text string, opts decod
 		dst = dst.Elem()
 	}
 
+	if sc, ok := reflect.TypeAssert[secretCodec](dst.Addr()); ok {
+		if err := sc.decodeSecret(ctx, text, opts); err != nil {
+			return wrapDecodeErr(dst.Type(), text, err)
+		}
+		return nil
+	}
 	if dst.Type() == timeTimeType && opts.Layout != "" {
 		return decodeTimeWithLayout(dst, text, opts.Layout)
 	}
@@ -132,6 +151,9 @@ func decodeBuiltinSpecial(dst reflect.Value, text string, opts decodeOpts) (bool
 		if err != nil {
 			return true, wrapDecodeErr(dst.Type(), text, err)
 		}
+		// String forces time.Local's lazy zone load, so the copy below
+		// carries its data.
+		_ = loc.String()
 		dst.Set(reflect.ValueOf(loc).Elem())
 		return true, nil
 	case netIPNetType:

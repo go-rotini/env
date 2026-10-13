@@ -134,8 +134,11 @@ func (e *ValidationError) Unwrap() error {
 }
 
 // ImmutableChangedError is reported when a reload candidate would have
-// changed a field tagged immutable. For secret-tagged fields, Old and
-// New are redacted (run through the loader's secret redactor).
+// changed a field tagged immutable. Old and New are the strings the
+// field was decoded from; they are run through the loader's secret
+// redactor for secret, fromFile and expand fields, and for every field
+// when the loader has a [Mutator] (whose output may be a resolved
+// secret).
 type ImmutableChangedError struct {
 	Field string
 	Key   string
@@ -231,6 +234,9 @@ func (m *MultiError) Append(err error) {
 
 // Sentinel errors. The struct-pointer sentinels match by type via each
 // error's Is method; the [errors.New] sentinels match by value identity.
+// Never pass a struct-pointer sentinel's address to [errors.As] (as in
+// &ErrParse): that overwrites the shared sentinel. Declare a variable of
+// the error type for errors.As instead.
 var (
 	// ErrMissingRequired matches any [*MissingRequiredError].
 	ErrMissingRequired = &MissingRequiredError{}
@@ -267,6 +273,18 @@ var (
 	// ErrConflictingFields is returned when two fields in the same
 	// struct resolve to the same env-var key after prefix accumulation.
 	ErrConflictingFields = errors.New("env: conflicting field names")
+
+	// ErrRecursiveType is returned when a struct type contains itself
+	// (directly or through pointers or embedding) along a path the
+	// loader would walk. Tag the self-referencing field with env:"-" to
+	// skip it.
+	ErrRecursiveType = errors.New("env: recursive struct type")
+
+	// ErrSeparatorInValue is returned by [Encode] when a slice, array or
+	// map element contains the separator it would be joined with, or a
+	// slice's only element is empty, so the output could not load back
+	// as the same value.
+	ErrSeparatorInValue = errors.New("env: element contains its separator")
 
 	// ErrUnsupportedType is returned when a struct field's target type
 	// cannot be decoded from a string by any built-in or interface

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestExpandFieldValue(t *testing.T) {
@@ -154,4 +155,80 @@ func TestLoad_ExpandTag_Cycle(t *testing.T) {
 	if err := loader.Load(&c); !errors.Is(err, ErrCycle) {
 		t.Errorf("err = %v, want ErrCycle", err)
 	}
+}
+
+func TestExpandFieldValue_UnterminatedBracesLinear(t *testing.T) {
+	t.Parallel()
+	lk := func(string) (string, bool) { return "", false }
+	text := strings.Repeat("${", 100_000)
+	start := time.Now()
+	got, err := expandFieldValue(text, "F", lk)
+	if err != nil || got != text {
+		t.Fatalf("got len %d, err %v", len(got), err)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Errorf("200 KB of unterminated ${ took %v", d)
+	}
+}
+
+// matchBraceScan is the per-reference scan matchBraces replaces: the
+// index in s of the `}` matching an implicit outer `{`, or -1.
+func matchBraceScan(s string) int {
+	depth := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '\\':
+			i++
+		case '{':
+			depth++
+		case '}':
+			if depth == 0 {
+				return i
+			}
+			depth--
+		}
+	}
+	return -1
+}
+
+func FuzzMatchBraces(f *testing.F) {
+	for _, s := range []string{"${A}", "${a{b ${c}", `${\}}`, "${${${", "x${A:-${B}}y}", `\${A}`} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		closes := matchBraces(s, nil)
+		for i := 0; i+1 < len(s); i++ {
+			if s[i] != '$' || s[i+1] != '{' {
+				continue
+			}
+			want := matchBraceScan(s[i+2:])
+			if want >= 0 {
+				want += i + 2
+			}
+			if got := closes.closeOf(i + 1); got != want {
+				t.Fatalf("%q at %d: matchBraces %d, scan %d", s, i, got, want)
+			}
+		}
+	})
+}
+
+func FuzzExpandFieldValue(f *testing.F) {
+	for _, s := range []string{"$A", "${A}", "${A:-${B:-x}}", "${A:?m}", `\$A`, "${", "${A-}", `${A:-\}}`} {
+		f.Add(s, "va")
+	}
+	f.Fuzz(func(t *testing.T, v, a string) {
+		if len(v) > 4096 {
+			return
+		}
+		lk := func(k string) (string, bool) {
+			switch k {
+			case "A":
+				return a, true
+			case "B":
+				return v, true
+			}
+			return "", false
+		}
+		_, _ = expandFieldValue(v, "F", lk)
+	})
 }

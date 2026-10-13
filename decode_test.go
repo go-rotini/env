@@ -932,3 +932,29 @@ func TestSeparatorOr(t *testing.T) {
 		t.Errorf("got %q, want \";\"", got)
 	}
 }
+
+func TestDecode_LocationLocalAndUTC(t *testing.T) {
+	t.Parallel()
+	var c struct {
+		Ptr   *time.Location   `env:"PTR"`
+		UTC   *time.Location   `env:"UTC"`
+		Val   time.Location    `env:"VAL"`
+		Slice []*time.Location `env:"SLICE"`
+	}
+	src := Map(map[string]string{"PTR": "Local", "UTC": "UTC", "VAL": "Local", "SLICE": "Local,UTC"})
+	if err := New(WithSource(src)).Load(&c); err != nil {
+		t.Fatal(err)
+	}
+	if c.Ptr != time.Local || c.UTC != time.UTC {
+		t.Errorf("Ptr=%p UTC=%p, want time.Local and time.UTC", c.Ptr, c.UTC)
+	}
+	if c.Slice[0] != time.Local || c.Slice[1] != time.UTC {
+		t.Errorf("Slice = %v", c.Slice)
+	}
+	when := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	wantName, wantOff := when.In(time.Local).Zone()
+	gotName, gotOff := when.In(&c.Val).Zone()
+	if c.Val.String() != "Local" || gotName != wantName || gotOff != wantOff {
+		t.Errorf("value field: %q %s %d, want Local %s %d", c.Val.String(), gotName, gotOff, wantName, wantOff)
+	}
+}

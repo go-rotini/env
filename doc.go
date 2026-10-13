@@ -74,14 +74,17 @@
 // base64, hex, unset. (`expand` performs `$VAR` / `${VAR}` / `${VAR-default}`
 // / `${VAR:-default}` / `${VAR:?message}` substitution on the resolved value,
 // resolving names verbatim against the source chain; unset references expand
-// to "". `${VAR:?msg}` for an unset VAR fails with [ErrExpansionAssertion].
+// to "". `${VAR:?msg}` for an unset VAR fails with [ErrExpansionAssertion];
+// the error includes the expanded message, except on secret fields.
 // As with [os.Expand]/POSIX shells, inside `${...}` a `-` (or `:-`, `:?`)
 // starts the operator section, so a variable whose name contains `-` cannot
 // be referenced with the `${...}` form — use a name without `-`, or `$NAME`
 // only if no `-` follows. `WithPrefix` is NOT applied to expansion
 // references.) Companion tags: envDesc:"..." for free-text help and
-// envPrefix:"PFX_" on nested struct fields. See the package README for the
-// full table.
+// envPrefix:"PFX_" on nested struct fields. An embedded struct's fields
+// are promoted without a prefix; an env tag on the embed is ignored
+// (except "-"), so use envPrefix to namespace them. See the package README
+// for the full table.
 //
 // # Pitfalls
 //
@@ -100,7 +103,11 @@
 //   - [os.Setenv] / [os.Unsetenv] are not thread-safe under cgo (golang/go
 //     #63567). This package never calls them from library code; the `unset`
 //     tag option is the single opt-in exception, serialized within a Load
-//     call. Disable globally via [WithoutUnset] in test environments.
+//     call. It removes the variable as soon as it is read (even if the
+//     value or another field then fails, so a retried Load, Watch or
+//     NewLive no longer finds it), and only when the process environment
+//     holds the loaded value. Disable globally via [WithoutUnset] in test
+//     environments.
 //   - [os.Environ] returns degenerate entries on Windows (empty keys,
 //     leading-`=` per-drive variables). [OSEnv] filters them; you don't see
 //     them via [Source.Lookup].
@@ -125,9 +132,13 @@
 //     stable view; mutating it through the returned pointer is a race.
 //   - Fields tagged `immutable` reject reload candidates that would change
 //     them. Initial load is exempt; subsequent reloads compare against the
-//     last successful snapshot. For a field that is also `expand`-tagged the
-//     comparison uses the post-expansion value, so a change in a referenced
-//     variable counts even when the field's own `${...}` template is unchanged.
+//     last successful load. The comparison (and [Event.Changed]) uses the
+//     string each field was decoded from, after defaults, mutators,
+//     expansion and fromFile, so a change in a referenced variable, a
+//     mutator's result or a file's contents counts.
+//   - The `unset` tag option removes a variable from the process
+//     environment during the first load. Reloads reuse the removed value
+//     rather than seeing the variable as missing.
 //
 // Concurrency:
 //
@@ -148,6 +159,9 @@
 //
 //   - [Encode] is a tooling feature, not a primary API. Secret-tagged and
 //     [Secret] fields redact to "***" by default; [WithEncodeIncludeSecrets] opts in.
+//     A slice or map element that contains its separator cannot be
+//     written so that it loads back, so Encode returns
+//     [ErrSeparatorInValue] for it.
 //     Encode + Load is byte-stable for canonical inputs but is not a
 //     round-trip for `.env` FILES (comments and original quoting are lost).
 //     For lossless `.env` editing, use github.com/go-rotini/dotenv's Parse →

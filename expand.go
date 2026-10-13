@@ -32,6 +32,11 @@ func expandText(text, goPath string, lookup func(string) (string, bool), chain [
 		return "", &CycleError{Chain: append([]string(nil), chain...)}
 	}
 	var b []byte
+	var (
+		closes   braceTable // built by matchBraces on the first `${`
+		built    bool
+		pairsBuf [8]bracePair
+	)
 	for i := 0; i < len(text); {
 		switch c := text[i]; c {
 		case '\\':
@@ -43,7 +48,10 @@ func expandText(text, goPath string, lookup func(string) (string, bool), chain [
 			b = append(b, c)
 			i++
 		case '$':
-			ref, n, ok := parseEnvRef(text[i:])
+			if !built && i+1 < len(text) && text[i+1] == '{' {
+				closes, built = matchBraces(text, pairsBuf[:0]), true
+			}
+			ref, n, ok := parseEnvRef(text, i, &closes)
 			if !ok {
 				b = append(b, '$')
 				i++
@@ -92,7 +100,7 @@ func appendEnvRef(b []byte, ref envRef, goPath string, lookup func(string) (stri
 		if msg == "" {
 			msg = "parameter not set"
 		}
-		return nil, fmt.Errorf("env: field %s: expansion of %q: %s: %w", goPath, ref.name, msg, ErrExpansionAssertion)
+		return nil, &assertionError{goPath: goPath, name: ref.name, msg: msg}
 	}
 	// envOpDash / envOpColonDash, default branch.
 	def, err := expandText(ref.arg, goPath, lookup, append(chain, ref.name), depth+1)
@@ -101,6 +109,21 @@ func appendEnvRef(b []byte, ref envRef, goPath string, lookup func(string) (stri
 	}
 	return append(b, def...), nil
 }
+
+// assertionError is a failed `${VAR:?message}`. The loader drops msg
+// for secret fields, since it is expanded and may hold other values.
+type assertionError struct {
+	goPath, name, msg string
+}
+
+func (e *assertionError) Error() string {
+	if e.msg == "" {
+		return fmt.Sprintf("env: field %s: expansion of %q: %v", e.goPath, e.name, ErrExpansionAssertion)
+	}
+	return fmt.Sprintf("env: field %s: expansion of %q: %s: %v", e.goPath, e.name, e.msg, ErrExpansionAssertion)
+}
+
+func (e *assertionError) Unwrap() error { return ErrExpansionAssertion }
 
 type envRefOp int
 
@@ -117,13 +140,15 @@ type envRef struct {
 	arg  string // default / message text; only meaningful when op != envOpNone
 }
 
-// parseEnvRef parses a `$NAME` or `${...}` reference at the start of s
-// (caller guarantees s[0] == '$'). It returns the parsed reference, the
-// number of bytes consumed, and ok=false when s does not begin with a
-// recognizable reference (a lone `$`, `$<non-identifier>`, or an
-// unterminated `${`).
-func parseEnvRef(s string) (ref envRef, consumed int, ok bool) {
-	if len(s) < 2 || s[0] != '$' {
+// parseEnvRef parses a `$NAME` or `${...}` reference at text[i]
+// (caller guarantees text[i] == '$'). closes is the [matchBraces] table
+// for text, needed only when text[i+1] is `{`. It returns the parsed
+// reference, the number of bytes consumed, and ok=false when no
+// recognizable reference starts there (a lone `$`, `$<non-identifier>`,
+// or an unterminated `${`).
+func parseEnvRef(text string, i int, closes *braceTable) (ref envRef, consumed int, ok bool) {
+	s := text[i:]
+	if len(s) < 2 {
 		return envRef{}, 0, false
 	}
 	if s[1] != '{' {
@@ -136,10 +161,11 @@ func parseEnvRef(s string) (ref envRef, consumed int, ok bool) {
 		}
 		return envRef{name: s[1:end]}, end, true
 	}
-	closeIdx := matchBrace(s[2:])
-	if closeIdx < 0 {
+	end := closes.closeOf(i + 1)
+	if end < 0 {
 		return envRef{}, 0, false
 	}
+	closeIdx := end - (i + 2)
 	body := s[2 : 2+closeIdx]
 	consumed = 2 + closeIdx + 1
 
@@ -150,25 +176,52 @@ func parseEnvRef(s string) (ref envRef, consumed int, ok bool) {
 	return envRef{name: body[:opIdx], op: op, arg: body[opIdx+opLen:]}, consumed, true
 }
 
-// matchBrace returns the index in s of the `}` matching the implicit
-// outer `{` (balancing nested `${...}`), or -1 when none. A backslash
-// escapes the next byte.
-func matchBrace(s string) int {
-	depth := 0
+// braceTable pairs each `{` of a string with its matching `}`, in
+// order of the `{` positions.
+type braceTable struct {
+	pairs []bracePair
+	next  int // lookup cursor; closeOf queries arrive in increasing order
+}
+
+type bracePair struct {
+	open, close int // close is -1 when the `{` is never closed
+}
+
+// closeOf returns the index of the `}` matching the `{` at pos, or -1
+// when there is none. Successive calls must pass increasing positions.
+func (t *braceTable) closeOf(pos int) int {
+	for t.next < len(t.pairs) && t.pairs[t.next].open < pos {
+		t.next++
+	}
+	if t.next < len(t.pairs) && t.pairs[t.next].open == pos {
+		return t.pairs[t.next].close
+	}
+	return -1
+}
+
+// matchBraces pairs every `{` of s with its matching `}` (balancing
+// nested braces), appending the pairs to buf. A backslash escapes the
+// next byte. One pass serves every `${` in s, keeping expansion linear
+// in len(s).
+func matchBraces(s string, buf []bracePair) braceTable {
+	t := braceTable{pairs: buf}
+	var stackBuf [8]int
+	open := stackBuf[:0] // indexes into t.pairs of unclosed braces
 	for i := 0; i < len(s); i++ {
 		switch s[i] {
 		case '\\':
 			i++
 		case '{':
-			depth++
+			open = append(open, len(t.pairs))
+			t.pairs = append(t.pairs, bracePair{open: i, close: -1})
 		case '}':
-			if depth == 0 {
-				return i
+			if n := len(open); n > 0 {
+				t.pairs[open[n-1]].close = i
+				open = open[:n-1]
 			}
-			depth--
 		}
 	}
-	return -1
+	return t
 }
 
 // firstTopLevelEnvOp finds the first ":-", ":?", or "-" at the top

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // --- Describe basics ---
@@ -647,6 +648,30 @@ func TestDescribe_RequireAllMarksRequired(t *testing.T) {
 	for _, d := range Describe(cfg{}) {
 		if d.Required != (d.Name == "C") {
 			t.Fatalf("without WithRequireAll: %s Required=%v", d.Name, d.Required)
+		}
+	}
+}
+
+func TestPrintUsage_TruncatesOnRuneBoundary(t *testing.T) {
+	t.Parallel()
+	type C struct {
+		A string `env:"A,default=ééééééééééééééééééééééééééééééééééééééééééééé"`
+		B string `env:"B,default=x"`
+	}
+	var buf bytes.Buffer
+	if err := PrintUsage(&buf, &C{}); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !utf8.ValidString(out) {
+		t.Fatalf("invalid UTF-8: %q", out)
+	}
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	header := utf8.RuneCountInString(lines[0][:strings.Index(lines[0], "REQUIRED")])
+	for _, l := range lines[1:] {
+		runes := []rune(l)
+		if header > len(runes) || (runes[header-1] != ' ') {
+			t.Errorf("misaligned row %q", l)
 		}
 	}
 }

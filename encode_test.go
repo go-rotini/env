@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"net/url"
@@ -12,6 +13,7 @@ import (
 	"reflect"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1396,5 +1398,70 @@ func TestEncode_SecretWrapperRedactedWithoutTag(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "TOKEN=hunter2") {
 		t.Fatalf("WithEncodeIncludeSecrets lost the value:\n%s", buf.String())
+	}
+}
+
+func TestEncode_SecretContainersRedacted(t *testing.T) {
+	t.Parallel()
+	c := struct {
+		Tokens []Secret[string]          `env:"TOKENS"`
+		ByHost map[string]Secret[string] `env:"BY_HOST"`
+	}{
+		Tokens: []Secret[string]{NewSecret("s3cretA")},
+		ByHost: map[string]Secret[string]{"a": NewSecret("s3cretC")},
+	}
+	var buf bytes.Buffer
+	if err := Encode(&buf, &c); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "s3cret") {
+		t.Errorf("secret leaked:\n%s", buf.String())
+	}
+	for _, d := range Describe(&c) {
+		if !d.Secret {
+			t.Errorf("%s not marked secret", d.Name)
+		}
+	}
+}
+
+func TestEncode_SeparatorInElement(t *testing.T) {
+	t.Parallel()
+	for name, v := range map[string]any{
+		"slice": &struct{ L []string }{L: []string{"a,b", "c"}},
+		"custom sep": &struct {
+			L []string `env:"L,separator=;"`
+		}{L: []string{"a;b"}},
+		"map key":   &struct{ M map[string]string }{M: map[string]string{"k:1": "v"}},
+		"map value": &struct{ M map[string]string }{M: map[string]string{"k": "v,w"}},
+	} {
+		if err := Encode(io.Discard, v); !errors.Is(err, ErrSeparatorInValue) {
+			t.Errorf("%s: Encode = %v, want ErrSeparatorInValue", name, err)
+		}
+	}
+	ok := &struct{ M map[string]string }{M: map[string]string{"k": "v:w"}}
+	if err := Encode(io.Discard, ok); err != nil {
+		t.Errorf("kv separator in a map value loads back fine: %v", err)
+	}
+}
+
+func TestEncode_SingleEmptyElementRejected(t *testing.T) {
+	t.Parallel()
+	type cfg struct {
+		L []string `env:"L"`
+	}
+	if err := Encode(io.Discard, cfg{L: []string{""}}); !errors.Is(err, ErrSeparatorInValue) {
+		t.Errorf("Encode([]string{\"\"}) = %v, want ErrSeparatorInValue", err)
+	}
+	for _, l := range [][]string{{}, {"", ""}, {"a"}} {
+		var buf bytes.Buffer
+		if err := Encode(&buf, cfg{L: l}); err != nil {
+			t.Errorf("Encode(%q) = %v", l, err)
+			continue
+		}
+		var out cfg
+		val := strings.TrimSuffix(strings.TrimPrefix(buf.String(), "L="), "\n")
+		if err := New(WithSource(Map(map[string]string{"L": val}))).Load(&out); err != nil || !slices.Equal(out.L, l) {
+			t.Errorf("%q round trip = %q, %v", l, out.L, err)
+		}
 	}
 }

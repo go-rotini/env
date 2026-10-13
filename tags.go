@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"unicode"
@@ -20,6 +21,9 @@ type fieldDescriptor struct {
 
 	// GoName is the Go field name.
 	GoName string
+
+	// Type is the field's declared Go type.
+	Type reflect.Type
 
 	// GoPath is the dotted Go path used in diagnostics ("DB.URL").
 	GoPath string
@@ -39,11 +43,13 @@ type fieldDescriptor struct {
 	Expand       bool
 	FromFile     bool
 	Unset        bool
-	Secret       bool
-	Immutable    bool
-	Layout       string
-	Base64       bool
-	Hex          bool
+	// Secret is set by the secret tag option or a [Secret] field type
+	// (also as a slice, array or map element).
+	Secret    bool
+	Immutable bool
+	Layout    string
+	Base64    bool
+	Hex       bool
 }
 
 // structInfo is the cached field-collection result for a struct type.
@@ -90,9 +96,11 @@ func collectStructInfo(t reflect.Type) *structInfo {
 
 // walker carries the cross-recursion state for collectStructInfo.
 // Loaders configured with [WithTagName] or [WithFieldNameTransform]
-// supply custom tagName / fieldNameXform values and bypass the cache.
+// supply custom tagName / fieldNameXform values and cache the result on
+// the loader instead.
 type walker struct {
 	fields         []fieldDescriptor
+	stack          []reflect.Type // struct types on the current path
 	seen           map[string]string
 	errs           []error
 	tagName        string
@@ -103,6 +111,8 @@ type walker struct {
 // parentIndex is the FieldByIndex prefix; parentPrefix is the
 // accumulated envPrefix; parentGoPath is the dotted Go path to t.
 func (w *walker) walk(t reflect.Type, parentIndex []int, parentPrefix, parentGoPath string) {
+	w.stack = append(w.stack, t)
+	defer func() { w.stack = w.stack[:len(w.stack)-1] }()
 	for i := range t.NumField() {
 		f := t.Field(i)
 		if !f.IsExported() && !f.Anonymous {
@@ -132,8 +142,12 @@ func (w *walker) walk(t reflect.Type, parentIndex []int, parentPrefix, parentGoP
 		}
 
 		// Anonymous embed: recurse without prepending the embed's name
-		// (Go promotes inner fields).
+		// (Go promotes inner fields). An env tag other than "-" is
+		// ignored here; envPrefix namespaces the promoted keys.
 		if f.Anonymous && ft.Kind() == reflect.Struct && !isLeafStruct(ft) {
+			if w.recursive(ft, goPath) {
+				continue
+			}
 			w.walk(ft, index, parentPrefix+envPrefix, parentGoPath)
 			continue
 		}
@@ -142,6 +156,9 @@ func (w *walker) walk(t reflect.Type, parentIndex []int, parentPrefix, parentGoP
 		// tag opts into treating the whole struct as a single keyed
 		// leaf for the decoder to handle.
 		if !hasEnvTag && ft.Kind() == reflect.Struct && !isLeafStruct(ft) && f.IsExported() {
+			if w.recursive(ft, goPath) {
+				continue
+			}
 			w.walk(ft, index, parentPrefix+envPrefix, goPath)
 			continue
 		}
@@ -174,6 +191,7 @@ func (w *walker) walk(t reflect.Type, parentIndex []int, parentPrefix, parentGoP
 		w.fields = append(w.fields, fieldDescriptor{
 			Index:        index,
 			GoName:       f.Name,
+			Type:         f.Type,
 			GoPath:       goPath,
 			Key:          key,
 			Description:  envDesc,
@@ -186,13 +204,23 @@ func (w *walker) walk(t reflect.Type, parentIndex []int, parentPrefix, parentGoP
 			Expand:       tag.Expand,
 			FromFile:     tag.FromFile,
 			Unset:        tag.Unset,
-			Secret:       tag.Secret,
+			Secret:       tag.Secret || isSecretType(f.Type),
 			Immutable:    tag.Immutable,
 			Layout:       tag.Layout,
 			Base64:       tag.Base64,
 			Hex:          tag.Hex,
 		})
 	}
+}
+
+// recursive reports, and records as an error, a struct type that is
+// already on the current walk path: descending into it would never end.
+func (w *walker) recursive(t reflect.Type, goPath string) bool {
+	if !slices.Contains(w.stack, t) {
+		return false
+	}
+	w.errs = append(w.errs, fmt.Errorf("field %s: type %s contains itself: %w", goPath, t, ErrRecursiveType))
+	return true
 }
 
 // fieldTag is the parsed body of one `env:"..."` tag.
@@ -315,15 +343,18 @@ func toScreamingSnake(name string) string {
 }
 
 var (
-	textUnmarshalerType   = reflect.TypeFor[encoding.TextUnmarshaler]()
-	binaryUnmarshalerType = reflect.TypeFor[encoding.BinaryUnmarshaler]()
+	unmarshalerType        = reflect.TypeFor[Unmarshaler]()
+	unmarshalerContextType = reflect.TypeFor[UnmarshalerContext]()
+	textUnmarshalerType    = reflect.TypeFor[encoding.TextUnmarshaler]()
+	binaryUnmarshalerType  = reflect.TypeFor[encoding.BinaryUnmarshaler]()
 )
 
 // isLeafStruct reports whether t should be treated as an opaque leaf:
 // either it's a built-in leaf the decoder handles without an
 // unmarshaler interface ([time.Location], [net.IPNet]), or *T
-// implements [encoding.TextUnmarshaler] or [encoding.BinaryUnmarshaler]
-// (which covers time.Time, url.URL, regexp.Regexp and math/big's
+// implements [Unmarshaler], [UnmarshalerContext],
+// [encoding.TextUnmarshaler] or [encoding.BinaryUnmarshaler] (which
+// covers [Secret], time.Time, url.URL, regexp.Regexp and math/big's
 // types). *T suffices: Go's method sets promote value-receiver methods.
 // Don't name types that implement those interfaces here: naming a
 // type keeps its methods (and their packages) linked into every program.
@@ -332,5 +363,6 @@ func isLeafStruct(t reflect.Type) bool {
 		return true
 	}
 	pt := reflect.PointerTo(t)
-	return pt.Implements(textUnmarshalerType) || pt.Implements(binaryUnmarshalerType)
+	return pt.Implements(unmarshalerType) || pt.Implements(unmarshalerContextType) ||
+		pt.Implements(textUnmarshalerType) || pt.Implements(binaryUnmarshalerType)
 }

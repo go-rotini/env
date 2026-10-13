@@ -4,6 +4,7 @@ import (
 	"context"
 	"maps"
 	"os"
+	"slices"
 	"strings"
 )
 
@@ -79,7 +80,9 @@ type mapOptions struct {
 // env-var semantics. Useful in cross-platform tests that need to exercise
 // case-insensitive lookup on a POSIX host.
 //
-// Folding is ASCII-only; non-ASCII bytes pass through unchanged.
+// Folding is ASCII-only; non-ASCII bytes pass through unchanged. When
+// several keys of the map fold to the same key, the value of the
+// greatest key in byte order wins (for example "path" over "PATH").
 func WithCaseInsensitive() MapOption {
 	return func(o *mapOptions) { o.caseInsensitive = true }
 }
@@ -98,8 +101,8 @@ func Map(m map[string]string, opts ...MapOption) Source {
 
 	dup := make(map[string]string, len(m))
 	if cfg.caseInsensitive {
-		for k, v := range m {
-			dup[asciiUpper(k)] = v
+		for _, k := range slices.Sorted(maps.Keys(m)) {
+			dup[asciiUpper(k)] = m[k]
 		}
 	} else {
 		maps.Copy(dup, m)
@@ -155,7 +158,8 @@ type emptySource struct{}
 func (emptySource) Lookup(string) (string, bool) { return "", false }
 
 // asciiUpper folds ASCII lowercase to uppercase and leaves non-ASCII
-// bytes unchanged, matching the runtime's Windows env-var case folding.
+// bytes unchanged. Windows also folds non-ASCII letters, so this only
+// approximates its env-var matching.
 func asciiUpper(s string) string {
 	needFold := false
 	for i := range len(s) {
