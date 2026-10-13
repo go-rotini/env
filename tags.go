@@ -347,7 +347,6 @@ var (
 	unmarshalerContextType = reflect.TypeFor[UnmarshalerContext]()
 	textUnmarshalerType    = reflect.TypeFor[encoding.TextUnmarshaler]()
 	binaryUnmarshalerType  = reflect.TypeFor[encoding.BinaryUnmarshaler]()
-	envSecretType          = reflect.TypeFor[interface{ isEnvSecret() }]()
 )
 
 // isLeafStruct reports whether t should be treated as an opaque leaf
@@ -358,7 +357,7 @@ var (
 //   - a type whose pointer implements [encoding.TextUnmarshaler] or
 //     [encoding.BinaryUnmarshaler] (time.Time, url.URL, regexp.Regexp,
 //     math/big's types);
-//   - a [Secret];
+//   - a [Secret] itself (a struct that embeds one is not);
 //   - a type whose pointer implements [Unmarshaler] or
 //     [UnmarshalerContext] and that has no fields the walk would load.
 //     A struct with such a method and loadable fields (its own or an
@@ -374,23 +373,35 @@ func isLeafStruct(t reflect.Type, tagName string) bool {
 // leafStruct is isLeafStruct with the struct types already on the
 // current check path, so self-referencing types terminate.
 func leafStruct(t reflect.Type, tagName string, path []reflect.Type) bool {
-	if t == timeLocationType || t == netIPNetType {
+	if builtinLeaf(t) {
+		return true
+	}
+	return envUnmarshaler(t) && !hasLoadableFields(t, tagName, path)
+}
+
+// builtinLeaf reports whether t is a leaf whatever its fields: a
+// built-in leaf, a text or binary unmarshaler, or a [Secret].
+func builtinLeaf(t reflect.Type) bool {
+	if t == timeLocationType || t == netIPNetType || isSecret(t) {
 		return true
 	}
 	pt := reflect.PointerTo(t)
-	if pt.Implements(textUnmarshalerType) || pt.Implements(binaryUnmarshalerType) ||
-		t.Implements(envSecretType) {
-		return true
-	}
-	if !pt.Implements(unmarshalerType) && !pt.Implements(unmarshalerContextType) {
-		return false
-	}
-	return !hasLoadableFields(t, tagName, path)
+	return pt.Implements(textUnmarshalerType) || pt.Implements(binaryUnmarshalerType)
+}
+
+// envUnmarshaler reports whether *t implements [Unmarshaler] or
+// [UnmarshalerContext].
+func envUnmarshaler(t reflect.Type) bool {
+	pt := reflect.PointerTo(t)
+	return pt.Implements(unmarshalerType) || pt.Implements(unmarshalerContextType)
 }
 
 // hasLoadableFields reports whether walking struct t would load at
-// least one field. It mirrors [walker.walk]'s choices; a struct type
-// already on path contributes nothing.
+// least one field, following [walker.walk]'s choices, except that a
+// struct type already on path contributes nothing where walk reports
+// [ErrRecursiveType]. So a self-referencing struct with an env
+// unmarshaler and fields is walked and fails with ErrRecursiveType; an
+// env tag on the field makes it a leaf loaded through the unmarshaler.
 func hasLoadableFields(t reflect.Type, tagName string, path []reflect.Type) bool {
 	if slices.Contains(path, t) {
 		return false
@@ -408,14 +419,19 @@ func hasLoadableFields(t reflect.Type, tagName string, path []reflect.Type) bool
 		for ft.Kind() == reflect.Pointer {
 			ft = ft.Elem()
 		}
-		recurse := ft.Kind() == reflect.Struct &&
+		walked := ft.Kind() == reflect.Struct &&
 			(f.Anonymous || (!hasEnvTag && f.IsExported())) &&
-			!leafStruct(ft, tagName, path)
-		if recurse {
+			!builtinLeaf(ft)
+		if walked {
+			// One call answers both questions: a struct with loadable
+			// fields is walked and so loads, and an env unmarshaler
+			// without them is a leaf that loads when exported.
 			if hasLoadableFields(ft, tagName, path) {
 				return true
 			}
-			continue
+			if !envUnmarshaler(ft) {
+				continue
+			}
 		}
 		if f.IsExported() {
 			return true

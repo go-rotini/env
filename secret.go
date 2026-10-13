@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"reflect"
 	"slices"
+	"strings"
 )
 
 // Secret is a generic wrapper that hides T's value in textual output
@@ -13,9 +14,10 @@ import (
 //
 //   - [fmt.Formatter], [fmt.Stringer], [fmt.GoStringer]: write the
 //     redaction marker for every fmt verb (%v, %#v, %d, %t, ...), never
-//     the value, except %p and %w: fmt rejects those for a Secret
-//     before it calls Format and prints the value by reflection. go vet
-//     reports both uses.
+//     the value, except %p and %w: fmt formats those by reflection
+//     without calling Format, so they print the value. go vet reports
+//     %w but not %p, since Secret implements [fmt.Formatter]. Don't pass
+//     a Secret, or a struct holding one, to %p or %w.
 //   - [slog.LogValuer]: emits the marker, so slog attributes redact
 //     automatically.
 //   - [Marshaler]: returns the underlying T for the reverse [Encode]
@@ -26,7 +28,8 @@ import (
 //
 // fmt also cannot reach the methods of a value in an unexported struct
 // field, so it prints such a field's contents by reflection. Keep
-// Secret fields exported. Two Secrets are == when their values are.
+// Secret fields exported. A Secret[T] is comparable when T is, and two
+// such Secrets are == when their values are.
 //
 // The field's tag options apply to T: base64/hex on a Secret[[]byte],
 // layout= on a Secret[time.Time], separator= on a Secret[[]string]. A
@@ -123,8 +126,16 @@ func (s *Secret[T]) renderSecret(e *encoder, fd fieldDescriptor) (string, error)
 // wrapper-redacted values stay distinguishable in logs.
 const secretMarker = "<redacted>"
 
-// isEnvSecret marks Secret[T] for [isSecretType].
-func (Secret[T]) isEnvSecret() {}
+// secretPkgPath is the import path [Secret] instantiations report.
+var secretPkgPath = reflect.TypeFor[Secret[struct{}]]().PkgPath()
+
+// isSecret reports whether t is an instantiation of [Secret] itself. A
+// struct that embeds a Secret is not one, although Secret's methods are
+// promoted to it.
+func isSecret(t reflect.Type) bool {
+	return t.Kind() == reflect.Struct && t.PkgPath() == secretPkgPath &&
+		strings.HasPrefix(t.Name(), "Secret[")
+}
 
 // isSecretType reports whether t is a [Secret] instantiation, looking
 // through pointers and slice, array and map element (and map key)
@@ -150,6 +161,6 @@ func secretTypeSeen(t reflect.Type, seen []reflect.Type) bool {
 			t = t.Elem()
 			continue
 		}
-		return t.Implements(envSecretType)
+		return isSecret(t)
 	}
 }

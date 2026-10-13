@@ -129,3 +129,79 @@ func TestLoad_UnmarshalerStructWithFieldsIsWalked(t *testing.T) {
 		t.Errorf("Describe names = %v, want %v", names, want)
 	}
 }
+
+// leafCreds embeds a Secret, which promotes its methods, and has a field
+// of its own: it is walked, not taken for a Secret.
+type leafCreds struct {
+	Secret[string]
+	User string
+}
+
+func TestLoad_EmbeddedSecretStructIsWalked(t *testing.T) {
+	var cfg struct {
+		DB leafCreds `envPrefix:"DB_"`
+	}
+	src := Map(map[string]string{"DB_USER": "u", "DB_SECRET": "s3cr3t"})
+	if err := New(WithSource(src)).Load(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DB.User != "u" || cfg.DB.Value() != "s3cr3t" {
+		t.Errorf("DB = {User: %q, Secret: %q}, want both loaded", cfg.DB.User, cfg.DB.Value())
+	}
+	var names []string
+	for _, d := range Describe(&cfg) {
+		names = append(names, d.Name)
+		if d.Name == "DB_SECRET" && !d.Secret {
+			t.Error("the embedded Secret is not marked secret")
+		}
+	}
+	if want := []string{"DB_SECRET", "DB_USER"}; !slices.Equal(names, want) {
+		t.Errorf("Describe names = %v, want %v", names, want)
+	}
+	if isSecretType(reflect.TypeFor[leafCreds]()) {
+		t.Error("a struct embedding a Secret is taken for a Secret")
+	}
+}
+
+// The deepest of a chain of embeds has UnmarshalEnv, which every level
+// above it inherits.
+type (
+	chain0 struct {
+		LeafLevel
+		S string
+	}
+	chain1  struct{ chain0 }
+	chain2  struct{ chain1 }
+	chain3  struct{ chain2 }
+	chain4  struct{ chain3 }
+	chain5  struct{ chain4 }
+	chain6  struct{ chain5 }
+	chain7  struct{ chain6 }
+	chain8  struct{ chain7 }
+	chain9  struct{ chain8 }
+	chain10 struct{ chain9 }
+	chain11 struct{ chain10 }
+	chain12 struct{ chain11 }
+	chain13 struct{ chain12 }
+	chain14 struct{ chain13 }
+	chain15 struct{ chain14 }
+	chain16 struct{ chain15 }
+	chain17 struct{ chain16 }
+	chain18 struct{ chain17 }
+	chain19 struct{ chain18 }
+	chain20 struct{ chain19 }
+)
+
+func TestIsLeafStruct_DeepUnmarshalerChainIsPolynomial(t *testing.T) {
+	typ := reflect.TypeFor[chain20]()
+	// Each level is checked once, so allocations grow with the depth;
+	// checking each level twice would take about 2²⁰.
+	allocs := testing.AllocsPerRun(1, func() {
+		if isLeafStruct(typ, "env") {
+			t.Error("chain20 is a leaf")
+		}
+	})
+	if allocs > 2_000 {
+		t.Errorf("isLeafStruct allocated %.0f times for a 20-level chain", allocs)
+	}
+}

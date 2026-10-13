@@ -364,13 +364,15 @@ func TestSecret_FormatAllVerbs(t *testing.T) {
 	}
 }
 
-// secretVerbs holds the verbs fmt rejects for a Secret before it calls
-// Format; a variable keeps vet from flagging the deliberate misuse.
+// secretVerbs holds the verbs fmt formats by reflection for a Secret
+// without calling Format; a variable keeps vet from flagging %w.
 var secretVerbs = []string{"%p", "%w"}
 
-// TestSecret_RejectedVerbsAreVetLimits records the documented limit:
-// %p and %w print the value by reflection (go vet reports both).
-func TestSecret_RejectedVerbsAreVetLimits(t *testing.T) {
+// TestSecret_RejectedVerbsPrintTheValue records the documented limit:
+// %p and %w print the value, because fmt formats them by reflection
+// without calling Format. go vet reports %w but not %p, since Secret
+// implements fmt.Formatter.
+func TestSecret_RejectedVerbsPrintTheValue(t *testing.T) {
 	s := NewSecret("hunter2")
 	for _, verb := range secretVerbs {
 		if got := fmt.Sprintf(verb, s); !strings.Contains(got, "%!") {
