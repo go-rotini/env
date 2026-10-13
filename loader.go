@@ -263,8 +263,10 @@ func (l *Loader) composedSource() Source {
 //  6. notEmpty check.
 //  7. fromFile substitution (read file contents as the value).
 //  8. Decode: custom decoder, then the value decoder (which checks, in
-//     order, [UnmarshalerContext], [Unmarshaler], [encoding.TextUnmarshaler],
-//     [encoding.BinaryUnmarshaler], built-in specials, then reflection).
+//     order, [Secret] (its value decoded the same way), layout= and
+//     base64/hex, [UnmarshalerContext], [Unmarshaler],
+//     [encoding.TextUnmarshaler], [encoding.BinaryUnmarshaler], built-in
+//     specials, then reflection).
 func (l *Loader) populateField(ctx context.Context, root reflect.Value, fd fieldDescriptor, resolvedKey string, src Source, multi *MultiError, st *loadState) {
 	rawValue, sourced := src.Lookup(resolvedKey)
 	if fd.Unset && !l.opts.withoutUnset {

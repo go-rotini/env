@@ -13,7 +13,9 @@ import (
 //
 //   - [fmt.Formatter], [fmt.Stringer], [fmt.GoStringer]: write the
 //     redaction marker for every fmt verb (%v, %#v, %d, %t, ...), never
-//     the value.
+//     the value, except %p and %w: fmt rejects those for a Secret
+//     before it calls Format and prints the value by reflection. go vet
+//     reports both uses.
 //   - [slog.LogValuer]: emits the marker, so slog attributes redact
 //     automatically.
 //   - [Marshaler]: returns the underlying T for the reverse [Encode]
@@ -22,16 +24,17 @@ import (
 //   - [Unmarshaler]: decodes via the standard decoder pipeline; works
 //     for any T the decoder accepts.
 //
-// The wrapper redacts the loaded value wherever it is printed or
-// logged, as long as fmt can call its methods: fmt cannot reach the
-// methods of a value in an unexported struct field, so it prints such a
-// field's contents by reflection. Keep Secret fields exported.
+// fmt also cannot reach the methods of a value in an unexported struct
+// field, so it prints such a field's contents by reflection. Keep
+// Secret fields exported. Two Secrets are == when their values are.
 //
 // The field's tag options apply to T: base64/hex on a Secret[[]byte],
 // layout= on a Secret[time.Time], separator= on a Secret[[]string]. A
 // field whose type is Secret[T], or a slice, array or map of
 // Secret[T], is treated as secret-tagged everywhere: [Encode],
 // [Describe], [*ParseError] and [*ImmutableChangedError] redact it.
+// A custom decoder or marshaler registered for T is not applied to a
+// Secret[T]: register one for Secret[T] itself.
 //
 //	type Config struct {
 //	    Token env.Secret[string] `env:"TOKEN,required"`
@@ -57,7 +60,7 @@ func (s Secret[T]) String() string {
 }
 
 // GoString implements [fmt.GoStringer] and returns the redaction
-// marker, so %#v formatting also redacts.
+// marker.
 func (s Secret[T]) GoString() string {
 	return secretMarker
 }
@@ -98,7 +101,7 @@ func (s Secret[T]) MarshalEnv() (string, error) {
 // options and gives an [UnmarshalerContext] T context.Background(); the
 // loader instead decodes T with the field's options and context.
 func (s *Secret[T]) UnmarshalEnv(text string) error {
-	return decodeValue(context.Background(), reflect.ValueOf(&s.v).Elem(), text, decodeOpts{})
+	return s.decodeSecret(context.Background(), text, decodeOpts{})
 }
 
 // secretCodec lets the decoder and encoder reach a Secret's T with the
@@ -113,7 +116,7 @@ func (s *Secret[T]) decodeSecret(ctx context.Context, text string, opts decodeOp
 }
 
 func (s *Secret[T]) renderSecret(e *encoder, fd fieldDescriptor) (string, error) {
-	return e.renderValue(reflect.ValueOf(&s.v).Elem(), fd)
+	return e.renderUncustomized(reflect.ValueOf(&s.v).Elem(), fd)
 }
 
 // secretMarker is intentionally distinct from the encoder's "***" so
@@ -147,6 +150,6 @@ func secretTypeSeen(t reflect.Type, seen []reflect.Type) bool {
 			t = t.Elem()
 			continue
 		}
-		return t.Implements(reflect.TypeFor[interface{ isEnvSecret() }]())
+		return t.Implements(envSecretType)
 	}
 }

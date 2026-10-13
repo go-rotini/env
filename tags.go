@@ -144,7 +144,7 @@ func (w *walker) walk(t reflect.Type, parentIndex []int, parentPrefix, parentGoP
 		// Anonymous embed: recurse without prepending the embed's name
 		// (Go promotes inner fields). An env tag other than "-" is
 		// ignored here; envPrefix namespaces the promoted keys.
-		if f.Anonymous && ft.Kind() == reflect.Struct && !isLeafStruct(ft) {
+		if f.Anonymous && ft.Kind() == reflect.Struct && !isLeafStruct(ft, w.tagName) {
 			if w.recursive(ft, goPath) {
 				continue
 			}
@@ -155,7 +155,7 @@ func (w *walker) walk(t reflect.Type, parentIndex []int, parentPrefix, parentGoP
 		// Named struct field with no env tag: recurse. An explicit env
 		// tag opts into treating the whole struct as a single keyed
 		// leaf for the decoder to handle.
-		if !hasEnvTag && ft.Kind() == reflect.Struct && !isLeafStruct(ft) && f.IsExported() {
+		if !hasEnvTag && ft.Kind() == reflect.Struct && !isLeafStruct(ft, w.tagName) && f.IsExported() {
 			if w.recursive(ft, goPath) {
 				continue
 			}
@@ -347,22 +347,79 @@ var (
 	unmarshalerContextType = reflect.TypeFor[UnmarshalerContext]()
 	textUnmarshalerType    = reflect.TypeFor[encoding.TextUnmarshaler]()
 	binaryUnmarshalerType  = reflect.TypeFor[encoding.BinaryUnmarshaler]()
+	envSecretType          = reflect.TypeFor[interface{ isEnvSecret() }]()
 )
 
-// isLeafStruct reports whether t should be treated as an opaque leaf:
-// either it's a built-in leaf the decoder handles without an
-// unmarshaler interface ([time.Location], [net.IPNet]), or *T
-// implements [Unmarshaler], [UnmarshalerContext],
-// [encoding.TextUnmarshaler] or [encoding.BinaryUnmarshaler] (which
-// covers [Secret], time.Time, url.URL, regexp.Regexp and math/big's
-// types). *T suffices: Go's method sets promote value-receiver methods.
-// Don't name types that implement those interfaces here: naming a
-// type keeps its methods (and their packages) linked into every program.
-func isLeafStruct(t reflect.Type) bool {
+// isLeafStruct reports whether t should be treated as an opaque leaf
+// when walked with the struct tag tagName:
+//
+//   - a built-in leaf the decoder handles without an unmarshaler
+//     interface ([time.Location], [net.IPNet]);
+//   - a type whose pointer implements [encoding.TextUnmarshaler] or
+//     [encoding.BinaryUnmarshaler] (time.Time, url.URL, regexp.Regexp,
+//     math/big's types);
+//   - a [Secret];
+//   - a type whose pointer implements [Unmarshaler] or
+//     [UnmarshalerContext] and that has no fields the walk would load.
+//     A struct with such a method and loadable fields (its own or an
+//     embedded type's) is still walked field by field.
+//
+// *T suffices: Go's method sets promote value-receiver methods. Don't
+// name types that implement those interfaces here: naming a type keeps
+// its methods (and their packages) linked into every program.
+func isLeafStruct(t reflect.Type, tagName string) bool {
+	return leafStruct(t, tagName, nil)
+}
+
+// leafStruct is isLeafStruct with the struct types already on the
+// current check path, so self-referencing types terminate.
+func leafStruct(t reflect.Type, tagName string, path []reflect.Type) bool {
 	if t == timeLocationType || t == netIPNetType {
 		return true
 	}
 	pt := reflect.PointerTo(t)
-	return pt.Implements(unmarshalerType) || pt.Implements(unmarshalerContextType) ||
-		pt.Implements(textUnmarshalerType) || pt.Implements(binaryUnmarshalerType)
+	if pt.Implements(textUnmarshalerType) || pt.Implements(binaryUnmarshalerType) ||
+		t.Implements(envSecretType) {
+		return true
+	}
+	if !pt.Implements(unmarshalerType) && !pt.Implements(unmarshalerContextType) {
+		return false
+	}
+	return !hasLoadableFields(t, tagName, path)
+}
+
+// hasLoadableFields reports whether walking struct t would load at
+// least one field. It mirrors [walker.walk]'s choices; a struct type
+// already on path contributes nothing.
+func hasLoadableFields(t reflect.Type, tagName string, path []reflect.Type) bool {
+	if slices.Contains(path, t) {
+		return false
+	}
+	path = append(path, t)
+	for f := range t.Fields() {
+		if !f.IsExported() && !f.Anonymous {
+			continue
+		}
+		envTag, hasEnvTag := f.Tag.Lookup(tagName)
+		if hasEnvTag && envTag == "-" {
+			continue
+		}
+		ft := f.Type
+		for ft.Kind() == reflect.Pointer {
+			ft = ft.Elem()
+		}
+		recurse := ft.Kind() == reflect.Struct &&
+			(f.Anonymous || (!hasEnvTag && f.IsExported())) &&
+			!leafStruct(ft, tagName, path)
+		if recurse {
+			if hasLoadableFields(ft, tagName, path) {
+				return true
+			}
+			continue
+		}
+		if f.IsExported() {
+			return true
+		}
+	}
+	return false
 }

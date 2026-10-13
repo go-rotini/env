@@ -290,7 +290,8 @@ func (e *encoder) encodeField(root reflect.Value, fd fieldDescriptor) error {
 // (high to low):
 //
 //  1. Custom marshaler from [WithCustomMarshaler].
-//  2. [Secret]: T rendered with the same options; tag overrides:
+//  2. [Secret]: T rendered with the same options, skipping a custom
+//     marshaler for T itself; tag overrides:
 //     time.Time + layout= → t.Format(layout); []byte / [N]byte +
 //     base64/hex → encoded form.
 //  3. [Marshaler] (MarshalEnv).
@@ -305,7 +306,14 @@ func (e *encoder) renderValue(field reflect.Value, fd fieldDescriptor) (string, 
 	if fn, ok := e.opts.customMarshalers[typ]; ok {
 		return fn(field)
 	}
+	return e.renderUncustomized(field, fd)
+}
 
+// renderUncustomized is renderValue without the custom marshaler for
+// field's own type. A Secret's value goes through it, as Load applies
+// no custom decoder to a Secret's value.
+func (e *encoder) renderUncustomized(field reflect.Value, fd fieldDescriptor) (string, error) {
+	typ := field.Type()
 	if field.CanAddr() {
 		if sc, ok := reflect.TypeAssert[secretCodec](field.Addr()); ok {
 			return sc.renderSecret(e, fd)
@@ -415,7 +423,7 @@ func (e *encoder) renderSliceOrArray(field reflect.Value, fd fieldDescriptor) (s
 		if strings.Contains(s, sep) {
 			return "", fmt.Errorf("env: field %s: element %d contains separator %q: %w", fd.GoPath, i, sep, ErrSeparatorInValue)
 		}
-		if s == "" && field.Kind() == reflect.Slice && field.Len() == 1 {
+		if s == "" && field.Len() == 1 {
 			return "", fmt.Errorf("env: field %s: the only element is empty: %w", fd.GoPath, ErrSeparatorInValue)
 		}
 		parts[i] = s

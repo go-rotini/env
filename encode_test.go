@@ -1444,6 +1444,33 @@ func TestEncode_SeparatorInElement(t *testing.T) {
 	}
 }
 
+func TestEncode_SingleEmptyArrayElementRejected(t *testing.T) {
+	t.Parallel()
+	type cfg struct {
+		A [1]string `env:"A"`
+	}
+	if err := Encode(io.Discard, cfg{A: [1]string{""}}); !errors.Is(err, ErrSeparatorInValue) {
+		t.Errorf("Encode([1]string{\"\"}) = %v, want ErrSeparatorInValue", err)
+	}
+}
+
+func TestEncode_SecretSkipsCustomMarshalerForValue(t *testing.T) {
+	t.Parallel()
+	type cfg struct {
+		S Secret[string] `env:"S"`
+		P string         `env:"P"`
+	}
+	var buf bytes.Buffer
+	err := Encode(&buf, cfg{S: NewSecret("ab"), P: "ab"}, WithEncodeIncludeSecrets(true),
+		WithCustomMarshaler(func(s string) (string, error) { return strings.ToUpper(s), nil }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := buf.String(), "S=ab\nP=AB\n"; got != want {
+		t.Errorf("Encode = %q, want %q", got, want)
+	}
+}
+
 func TestEncode_SingleEmptyElementRejected(t *testing.T) {
 	t.Parallel()
 	type cfg struct {

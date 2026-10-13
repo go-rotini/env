@@ -12,7 +12,7 @@ This package is used as the default environment-variable support package for [ro
 - Principled `Source` interface: `OSEnv()`, `Map`, `Multi(...)` built in; `.env` parsing via [go-rotini/dotenv](https://github.com/go-rotini/dotenv); any other store (such as a secret manager) plugs in by implementing `Source`
 - `context.Context` support: `LoadContext` threads the context to mutators and to `UnmarshalerContext` / `ValidatorContext` hooks
 - Atomic, lock-free reads on reload via `Live[T]` and `sync/atomic.Pointer`
-- Per-field `immutable` enforcement: reload candidates that change a marked field are rejected (old/new values redacted for secret and `fromFile` fields)
+- Per-field `immutable` enforcement: reload candidates that change a marked field are rejected (old/new values redacted for secret, `fromFile` and `expand` fields, and for every field when a mutator is set)
 - Secret-redacting output (`String()`, `Describe`, `PrintUsage`, `Markdown`, `Encode`) plus a `Secret[T]` wrapper integrating with `slog.LogValuer`
 - Variable expansion on tagged values (`expand` tag): `$VAR`, `${VAR}`, `${VAR-default}`, `${VAR:-default}`, `${VAR:?error}` — references resolve against the source chain, used verbatim (no `WithPrefix` applied)
 - Built-in support for `time.Duration`, `time.Time`, `*time.Location`, `url.URL`, `net.IP`, `*net.IPNet`, `regexp.Regexp`, `[]byte` (raw, base64, hex), plus `encoding.TextUnmarshaler` and `encoding.BinaryUnmarshaler` interop

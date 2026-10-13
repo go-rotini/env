@@ -364,6 +364,38 @@ func TestSecret_FormatAllVerbs(t *testing.T) {
 	}
 }
 
+// secretVerbs holds the verbs fmt rejects for a Secret before it calls
+// Format; a variable keeps vet from flagging the deliberate misuse.
+var secretVerbs = []string{"%p", "%w"}
+
+// TestSecret_RejectedVerbsAreVetLimits records the documented limit:
+// %p and %w print the value by reflection (go vet reports both).
+func TestSecret_RejectedVerbsAreVetLimits(t *testing.T) {
+	s := NewSecret("hunter2")
+	for _, verb := range secretVerbs {
+		if got := fmt.Sprintf(verb, s); !strings.Contains(got, "%!") {
+			t.Errorf("%q = %q; fmt no longer rejects it, so update the Secret godoc", verb, got)
+		}
+	}
+}
+
+func TestSecret_EqualityComparesValues(t *testing.T) {
+	type cfg struct {
+		Token Secret[string]
+		Port  int
+	}
+	if NewSecret("a") != NewSecret("a") || NewSecret("a") == NewSecret("b") {
+		t.Error("== on Secrets does not compare values")
+	}
+	var loaded cfg
+	if err := loaded.Token.UnmarshalEnv("a"); err != nil {
+		t.Fatal(err)
+	}
+	if loaded != (cfg{Token: NewSecret("a")}) {
+		t.Error("configs holding equal Secrets compare unequal")
+	}
+}
+
 func TestSecret_TagOptionsApplied(t *testing.T) {
 	type cfg struct {
 		Key  Secret[[]byte]    `env:"KEY,base64"`

@@ -281,9 +281,9 @@ var (
 	ErrRecursiveType = errors.New("env: recursive struct type")
 
 	// ErrSeparatorInValue is returned by [Encode] when a slice, array or
-	// map element contains the separator it would be joined with, or a
-	// slice's only element is empty, so the output could not load back
-	// as the same value.
+	// map element contains the separator it would be joined with, or the
+	// only element of a slice or array is empty, so the output could not
+	// load back as the same value.
 	ErrSeparatorInValue = errors.New("env: element contains its separator")
 
 	// ErrUnsupportedType is returned when a struct field's target type

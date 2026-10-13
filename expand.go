@@ -24,10 +24,17 @@ const maxExpandDepth = 16
 // themselves expanded; non-termination there yields a [*CycleError].
 // goPath is included in returned errors for field context.
 func expandFieldValue(text, goPath string, lookup func(name string) (value string, ok bool)) (string, error) {
-	return expandText(text, goPath, lookup, nil, 0)
+	x := expansion{goPath: goPath}
+	return x.expand(text, lookup, nil, 0)
 }
 
-func expandText(text, goPath string, lookup func(string) (string, bool), chain []string, depth int) (string, error) {
+// expansion is the state of one expandFieldValue call.
+type expansion struct {
+	goPath  string
+	scanned int // bytes matchBraces has visited, which stays linear in the input
+}
+
+func (x *expansion) expand(text string, lookup func(string) (string, bool), chain []string, depth int) (string, error) {
 	if depth > maxExpandDepth {
 		return "", &CycleError{Chain: append([]string(nil), chain...)}
 	}
@@ -50,6 +57,7 @@ func expandText(text, goPath string, lookup func(string) (string, bool), chain [
 		case '$':
 			if !built && i+1 < len(text) && text[i+1] == '{' {
 				closes, built = matchBraces(text, pairsBuf[:0]), true
+				x.scanned += len(text)
 			}
 			ref, n, ok := parseEnvRef(text, i, &closes)
 			if !ok {
@@ -58,7 +66,7 @@ func expandText(text, goPath string, lookup func(string) (string, bool), chain [
 				continue
 			}
 			var err error
-			if b, err = appendEnvRef(b, ref, goPath, lookup, chain, depth); err != nil {
+			if b, err = x.appendRef(b, ref, lookup, chain, depth); err != nil {
 				return "", err
 			}
 			i += n
@@ -70,10 +78,10 @@ func expandText(text, goPath string, lookup func(string) (string, bool), chain [
 	return string(b), nil
 }
 
-// appendEnvRef resolves one reference against lookup and appends the
+// appendRef resolves one reference against lookup and appends the
 // result (or the expanded default) to b. A `${VAR:?msg}` for an unset
 // VAR returns an error wrapping [ErrExpansionAssertion].
-func appendEnvRef(b []byte, ref envRef, goPath string, lookup func(string) (string, bool), chain []string, depth int) ([]byte, error) {
+func (x *expansion) appendRef(b []byte, ref envRef, lookup func(string) (string, bool), chain []string, depth int) ([]byte, error) {
 	val, isSet := lookup(ref.name)
 	switch ref.op {
 	case envOpNone:
@@ -93,17 +101,17 @@ func appendEnvRef(b []byte, ref envRef, goPath string, lookup func(string) (stri
 		if isSet {
 			return append(b, val...), nil
 		}
-		msg, err := expandText(ref.arg, goPath, lookup, append(chain, ref.name), depth+1)
+		msg, err := x.expand(ref.arg, lookup, append(chain, ref.name), depth+1)
 		if err != nil {
 			return nil, err
 		}
 		if msg == "" {
 			msg = "parameter not set"
 		}
-		return nil, &assertionError{goPath: goPath, name: ref.name, msg: msg}
+		return nil, &assertionError{goPath: x.goPath, name: ref.name, msg: msg}
 	}
 	// envOpDash / envOpColonDash, default branch.
-	def, err := expandText(ref.arg, goPath, lookup, append(chain, ref.name), depth+1)
+	def, err := x.expand(ref.arg, lookup, append(chain, ref.name), depth+1)
 	if err != nil {
 		return nil, err
 	}

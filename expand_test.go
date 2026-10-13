@@ -4,7 +4,6 @@ import (
 	"errors"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestExpandFieldValue(t *testing.T) {
@@ -161,13 +160,28 @@ func TestExpandFieldValue_UnterminatedBracesLinear(t *testing.T) {
 	t.Parallel()
 	lk := func(string) (string, bool) { return "", false }
 	text := strings.Repeat("${", 100_000)
-	start := time.Now()
-	got, err := expandFieldValue(text, "F", lk)
+	x := expansion{goPath: "F"}
+	got, err := x.expand(text, lk, nil, 0)
 	if err != nil || got != text {
 		t.Fatalf("got len %d, err %v", len(got), err)
 	}
-	if d := time.Since(start); d > 2*time.Second {
-		t.Errorf("200 KB of unterminated ${ took %v", d)
+	if x.scanned != len(text) {
+		t.Errorf("brace matching visited %d bytes of a %d-byte value, want one pass", x.scanned, len(text))
+	}
+}
+
+func TestExpandFieldValue_DefaultsScannedOnce(t *testing.T) {
+	t.Parallel()
+	lk := func(name string) (string, bool) { return "y", name == "Y" }
+	text := strings.Repeat("${X:-${Y}}", 10_000)
+	x := expansion{goPath: "F"}
+	got, err := x.expand(text, lk, nil, 0)
+	if err != nil || got != strings.Repeat("y", 10_000) {
+		t.Fatalf("got len %d, err %v", len(got), err)
+	}
+	// The value once, then each default once.
+	if want := len(text) + 10_000*len("${Y}"); x.scanned != want {
+		t.Errorf("brace matching visited %d bytes, want %d", x.scanned, want)
 	}
 }
 
