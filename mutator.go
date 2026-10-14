@@ -14,14 +14,18 @@ type Mutator interface {
 	// MutateEnv inspects or rewrites the value the loader is about to
 	// decode.
 	//
+	//   originalKey   : the field's variable name without [WithPrefix].
+	//   resolvedKey   : the name looked up in the sources (prefix applied).
 	//   originalValue : the source's view (no defaults applied);
 	//                   "" when sourced is false.
 	//   currentValue  : the value after default application and any
 	//                   earlier mutators in the chain.
 	//   sourced       : false when no Source returned ok=true.
 	//
-	// stop=true halts the chain immediately and feeds newValue to the
-	// decoder. A non-nil err terminates the per-field pipeline.
+	// stop=true skips the remaining mutators; newValue continues
+	// through the rest of the field pipeline (required check, expand,
+	// notEmpty, fromFile, decode). A non-empty newValue counts as a
+	// value for an unset field. A non-nil err fails the field.
 	MutateEnv(
 		ctx context.Context,
 		originalKey, resolvedKey, originalValue, currentValue string,

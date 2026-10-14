@@ -7,23 +7,55 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 )
 
 // Loader is a configured environment-variable loader. Construct with
 // [New]; safe for concurrent use after construction.
 type Loader struct {
 	opts loaderOptions
+
+	// defaultWalk is set when the tag name and field-name transform are
+	// the defaults, so the package-wide field cache applies.
+	defaultWalk bool
+
+	// cache maps a struct type to its *loaderFields when this loader
+	// cannot use the package-wide cache directly (non-default walk or a
+	// prefix).
+	cache sync.Map
+}
+
+// loaderFields is a loader's view of a struct type: the walked fields
+// and each field's key with [WithPrefix] applied.
+type loaderFields struct {
+	info *structInfo
+	keys []string
+}
+
+// loadState is the per-load bookkeeping that live reload needs.
+type loadState struct {
+	// values maps each field's key to the final string it was decoded
+	// from (after defaults, mutators, expansion and fromFile), or to
+	// [unsetSentinel] when the field had no value.
+	values map[string]string
+
+	// retained maps each unset-tagged key removed from the process
+	// environment to its value, so later reloads still see it. It is
+	// shared across every load of one [Loader.Watch] or [Live].
+	retained map[string]string
 }
 
 // New returns a [Loader] with opts applied to the defaults: source
-// chain = [[OSEnv]], no prefix, tag name "env", SCREAMING_SNAKE_CASE
+// chain of [OSEnv] alone, no prefix, tag name "env", SCREAMING_SNAKE_CASE
 // field-name transform, no logger, optional-by-default field policy.
 func New(opts ...Option) *Loader {
 	o := defaultLoaderOptions()
 	for _, opt := range opts {
 		opt(&o)
 	}
-	return &Loader{opts: o}
+	l := &Loader{opts: o}
+	l.defaultWalk = l.usesDefaultWalkConfig()
+	return l
 }
 
 // Load decodes the configured sources into v. v must be a non-nil
@@ -39,6 +71,11 @@ func (l *Loader) Load(v any) error {
 // [UnmarshalerContext], and to a [ValidatorContext] hook on the target
 // struct (if it implements one). ctx must not be nil.
 func (l *Loader) LoadContext(ctx context.Context, v any) error {
+	return l.load(ctx, v, nil)
+}
+
+// load is [Loader.LoadContext] with optional live-reload bookkeeping.
+func (l *Loader) load(ctx context.Context, v any, st *loadState) error {
 	if ctx == nil {
 		return ErrNilContext
 	}
@@ -54,16 +91,16 @@ func (l *Loader) LoadContext(ctx context.Context, v any) error {
 		return fmt.Errorf("got %T: %w", v, ErrNotStruct)
 	}
 
-	info, err := l.structInfo(rv.Type())
-	if err != nil {
-		return err
+	info, keys := l.fields(rv.Type())
+	if info.Err != nil {
+		return info.Err
 	}
 
 	src := l.composedSource()
 
 	multi := &MultiError{}
-	for _, fd := range info.Fields {
-		l.populateField(ctx, rv, fd, src, multi)
+	for i, fd := range info.Fields {
+		l.populateField(ctx, rv, fd, l.key(keys, i, fd), src, multi, st)
 	}
 
 	// Skip whole-struct validation when per-field errors exist; the
@@ -109,15 +146,15 @@ func (l *Loader) Snapshot(v any) (map[string]string, error) {
 		return nil, fmt.Errorf("got %T: %w", v, ErrNotStruct)
 	}
 
-	info, err := l.structInfo(rv.Type())
-	if err != nil {
-		return nil, err
+	info, keys := l.fields(rv.Type())
+	if info.Err != nil {
+		return nil, info.Err
 	}
 
 	src := l.composedSource()
 	out := make(map[string]string, len(info.Fields))
-	for _, fd := range info.Fields {
-		key := l.opts.prefix + fd.Key
+	for i, fd := range info.Fields {
+		key := l.key(keys, i, fd)
 		if val, ok := src.Lookup(key); ok {
 			out[key] = val
 		} else if fd.HasDefault {
@@ -135,14 +172,46 @@ func (l *Loader) structInfo(t reflect.Type) (*structInfo, error) {
 	return info, nil
 }
 
-// lookupStructInfo serves from the package-wide cache when the loader
-// runs with default tag-walk config; non-default loaders bypass the
-// cache and re-walk per call.
+// lookupStructInfo returns the walked fields of t for this loader.
 func (l *Loader) lookupStructInfo(t reflect.Type) *structInfo {
-	if l.usesDefaultWalkConfig() {
-		return getStructInfo(t)
+	info, _ := l.fields(t)
+	return info
+}
+
+// fields returns the walked fields of t and their prefixed keys. keys
+// is nil when the keys need no prefix; use [Loader.key] to read them.
+// Loaders with the default walk config share the package-wide cache;
+// others walk each type once and cache it on the loader.
+func (l *Loader) fields(t reflect.Type) (*structInfo, []string) {
+	if l.defaultWalk && l.opts.prefix == "" {
+		return getStructInfo(t), nil
 	}
-	return l.collectStructInfoFresh(t)
+	if c, ok := l.cache.Load(t); ok {
+		lf, _ := c.(*loaderFields)
+		return lf.info, lf.keys
+	}
+	var info *structInfo
+	if l.defaultWalk {
+		info = getStructInfo(t)
+	} else {
+		info = l.collectStructInfoFresh(t)
+	}
+	keys := make([]string, len(info.Fields))
+	for i, fd := range info.Fields {
+		keys[i] = l.opts.prefix + fd.Key
+	}
+	c, _ := l.cache.LoadOrStore(t, &loaderFields{info: info, keys: keys})
+	lf, _ := c.(*loaderFields)
+	return lf.info, lf.keys
+}
+
+// key returns the prefixed key of field i from keys as returned by
+// [Loader.fields].
+func (*Loader) key(keys []string, i int, fd fieldDescriptor) string {
+	if keys == nil {
+		return fd.Key
+	}
+	return keys[i]
 }
 
 func (l *Loader) usesDefaultWalkConfig() bool {
@@ -185,7 +254,8 @@ func (l *Loader) composedSource() Source {
 
 // populateField runs the per-field pipeline:
 //
-//  1. Source lookup.
+//  1. Source lookup; for an unset-tagged field, removal of the variable
+//     from the process environment (unless [WithoutUnset]).
 //  2. Default application (if not sourced).
 //  3. Mutator chain (may rewrite or synthesize).
 //  4. Required check (when the field has no value at all).
@@ -193,13 +263,19 @@ func (l *Loader) composedSource() Source {
 //  6. notEmpty check.
 //  7. fromFile substitution (read file contents as the value).
 //  8. Decode: custom decoder, then the value decoder (which checks, in
-//     order, [UnmarshalerContext], [Unmarshaler], [encoding.TextUnmarshaler],
-//     [encoding.BinaryUnmarshaler], built-in specials, then reflection).
-//  9. unset (call os.Unsetenv unless [WithoutUnset]).
-func (l *Loader) populateField(ctx context.Context, root reflect.Value, fd fieldDescriptor, src Source, multi *MultiError) {
-	resolvedKey := l.opts.prefix + fd.Key
-
+//     order, [Secret] (its value decoded the same way), layout= and
+//     base64/hex, [UnmarshalerContext], [Unmarshaler],
+//     [encoding.TextUnmarshaler], [encoding.BinaryUnmarshaler], built-in
+//     specials, then reflection).
+func (l *Loader) populateField(ctx context.Context, root reflect.Value, fd fieldDescriptor, resolvedKey string, src Source, multi *MultiError, st *loadState) {
 	rawValue, sourced := src.Lookup(resolvedKey)
+	if fd.Unset && !l.opts.withoutUnset {
+		if sourced {
+			unsetOS(resolvedKey, rawValue, st)
+		} else if v, ok := st.retainedValue(resolvedKey); ok {
+			rawValue, sourced = v, true
+		}
+	}
 	originalValue := rawValue
 	hasValue := sourced
 
@@ -224,12 +300,12 @@ func (l *Loader) populateField(ctx context.Context, root reflect.Value, fd field
 	}
 
 	if !hasValue {
+		st.record(resolvedKey, unsetSentinel)
 		if fd.Required || fd.NotEmpty || (l.opts.requireAll && !fd.HasDefault) {
 			multi.Append(&MissingRequiredError{
 				Field: fd.GoPath,
 				Key:   resolvedKey,
 			})
-			return
 		}
 		return
 	}
@@ -237,6 +313,9 @@ func (l *Loader) populateField(ctx context.Context, root reflect.Value, fd field
 	if fd.Expand {
 		expanded, err := expandFieldValue(rawValue, fd.GoPath, src.Lookup)
 		if err != nil {
+			if ae, ok := errors.AsType[*assertionError](err); ok && fd.Secret {
+				err = &assertionError{goPath: ae.goPath, name: ae.name}
+			}
 			multi.Append(err)
 			return
 		}
@@ -256,8 +335,8 @@ func (l *Loader) populateField(ctx context.Context, root reflect.Value, fd field
 	if fd.FromFile && rawValue != "" {
 		data, err := os.ReadFile(rawValue)
 		if err != nil {
-			multi.Append(fmt.Errorf("env: field %s: read %q: %w",
-				fd.GoPath, rawValue, ErrFromFileRead))
+			multi.Append(fmt.Errorf("env: field %s: read %q: %w: %w",
+				fd.GoPath, rawValue, ErrFromFileRead, err))
 			return
 		}
 		text := string(data)
@@ -266,60 +345,88 @@ func (l *Loader) populateField(ctx context.Context, root reflect.Value, fd field
 		rawValue = text
 	}
 
-	field := fieldByIndexAlloc(root, fd.Index)
+	st.record(resolvedKey, rawValue)
+
+	field, err := fieldByIndexAlloc(root, fd.Index)
+	if err != nil {
+		multi.Append(fmt.Errorf("env: field %s: %w", fd.GoPath, err))
+		return
+	}
 
 	if dec, ok := l.opts.customDecoders[field.Type()]; ok {
 		if err := dec(rawValue, field); err != nil {
+			if _, ok := errors.AsType[*ParseError](err); !ok { //nolint:errcheck // only whether it matches is used
+				err = wrapDecodeErr(field.Type(), rawValue, err)
+			}
 			multi.Append(l.annotateParseError(err, fd, resolvedKey, rawValue, field.Type()))
-			return
 		}
-		l.maybeUnset(fd, resolvedKey)
 		return
 	}
 
 	if err := decodeValue(ctx, field, rawValue, decodeOptsFromDescriptor(fd)); err != nil {
 		multi.Append(l.annotateParseError(err, fd, resolvedKey, rawValue, field.Type()))
-		return
 	}
-
-	l.maybeUnset(fd, resolvedKey)
 }
 
-// maybeUnset honors the `unset` tag after a successful decode (no-op
-// under [WithoutUnset]). os.Unsetenv is not thread-safe under cgo
-// (POSIX setenv/unsetenv can race with getaddrinfo when
-// GODEBUG=netdns=cgo); the loader serializes calls within a single
-// Load. Callers should perform their initial Load before spawning
-// goroutines that may trigger cgo lookups.
-func (l *Loader) maybeUnset(fd fieldDescriptor, resolvedKey string) {
-	if !fd.Unset || l.opts.withoutUnset {
+// unsetOS honors the `unset` tag: it removes key from the process
+// environment when the environment holds the value that was loaded, so
+// a same-named variable the value did not come from is left alone. The
+// removed value is kept in st for later reloads. os.Unsetenv is not
+// thread-safe under cgo (POSIX setenv/unsetenv can race with
+// getaddrinfo when GODEBUG=netdns=cgo); callers should perform their
+// initial Load before spawning goroutines that may trigger cgo lookups.
+func unsetOS(key, value string, st *loadState) {
+	if v, ok := os.LookupEnv(key); !ok || v != value {
 		return
 	}
-	_ = os.Unsetenv(resolvedKey)
+	_ = os.Unsetenv(key)
+	if st != nil {
+		st.retained[key] = value
+	}
 }
 
-// fieldByIndexAlloc walks index on root, allocating nil intermediate
-// pointer-to-struct fields. Avoids the panic from
-// [reflect.Value.FieldByIndex] on nil intermediates. Loader
-// preconditions guarantee every descendant is settable, so allocation
-// always succeeds.
-func fieldByIndexAlloc(root reflect.Value, index []int) reflect.Value {
+func (st *loadState) record(key, value string) {
+	if st != nil {
+		st.values[key] = value
+	}
+}
+
+func (st *loadState) retainedValue(key string) (string, bool) {
+	if st == nil {
+		return "", false
+	}
+	v, ok := st.retained[key]
+	return v, ok
+}
+
+// fieldByIndexAlloc walks index on root, allocating nil pointers to
+// intermediate structs (every pointer level). It fails, rather than
+// panicking, when a nil pointer cannot be set: an embedded pointer to
+// an unexported struct type.
+func fieldByIndexAlloc(root reflect.Value, index []int) (reflect.Value, error) {
 	v := root
 	for i, idx := range index {
-		if i > 0 && v.Kind() == reflect.Pointer {
-			if v.IsNil() {
-				v.Set(reflect.New(v.Type().Elem()))
+		if i > 0 {
+			for v.Kind() == reflect.Pointer {
+				if v.IsNil() {
+					if !v.CanSet() {
+						return reflect.Value{}, fmt.Errorf(
+							"cannot allocate nil embedded pointer to unexported struct %s: %w",
+							v.Type().Elem(), ErrUnsupportedType)
+					}
+					v.Set(reflect.New(v.Type().Elem()))
+				}
+				v = v.Elem()
 			}
-			v = v.Elem()
 		}
 		v = v.Field(idx)
 	}
-	return v
+	return v, nil
 }
 
 // annotateParseError adds field context to a [*ParseError] returned by
-// the decoder, redacting the value (and the cause, since stdlib parse
-// errors quote the raw value) for secret-tagged fields. Non-ParseError
+// the decoder, redacting the value (and the cause, since parse errors
+// commonly quote the raw value) for secret fields. Non-ParseError
 // returns are passed through.
 func (l *Loader) annotateParseError(err error, fd fieldDescriptor, key, value string, typ reflect.Type) error {
 	var pe *ParseError

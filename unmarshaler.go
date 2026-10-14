@@ -14,9 +14,8 @@ type Unmarshaler interface {
 // [Loader.Load] / the package-level [Load]). The loader checks a
 // field's address for this interface and, failing that, for
 // [Unmarshaler] — a type satisfies one or the other, never both (Go
-// method names cannot be overloaded). It is consulted only at the top
-// level of a field, not for slice elements or map values, which the
-// (context-free) value decoder handles.
+// method names cannot be overloaded). Slice and array elements and map
+// keys and values receive the same context.
 type UnmarshalerContext interface {
 	UnmarshalEnv(ctx context.Context, s string) error
 }

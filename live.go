@@ -2,7 +2,6 @@ package env
 
 import (
 	"context"
-	"reflect"
 	"sync"
 	"sync/atomic"
 )
@@ -35,51 +34,29 @@ func NewLive[T any](opts ...Option) (*Live[T], error) {
 }
 
 // NewLiveWithLoader is like [NewLive] but uses an existing [*Loader].
+// A nil l returns [ErrNilPointer].
 func NewLiveWithLoader[T any](l *Loader) (*Live[T], error) {
 	if l == nil {
 		return nil, ErrNilPointer
 	}
 	var initial T
-	if err := l.Load(&initial); err != nil {
+	tr, err := l.newTracker(context.Background(), &initial)
+	if err != nil {
 		return nil, err
 	}
 	live := &Live[T]{loader: l}
 	live.curr.Store(&initial)
-
-	tType := reflect.TypeOf(initial)
-	prevImmutable, immMeta, err := l.snapshotImmutable(tType)
-	if err != nil {
-		return nil, err
-	}
-	prevAll, err := l.snapshotKnownKeys(tType)
-	if err != nil {
-		return nil, err
-	}
-	redact := l.redactor()
 
 	ctx, cancel := context.WithCancel(context.Background()) //nolint:gosec // cancel is invoked from Live.Close; the engine outlives this constructor.
 	live.cancel = cancel
 
 	reload := func(ctx context.Context, _ []string) reloadOutcome {
 		var candidate T
-		if err := l.LoadContext(ctx, &candidate); err != nil {
-			return reloadOutcome{err: err}
-		}
-		newImmutable, _, err := l.snapshotImmutable(tType)
-		if err != nil {
-			return reloadOutcome{err: err}
-		}
-		if mismatch := compareImmutable(prevImmutable, newImmutable, immMeta, redact); mismatch != nil {
-			return reloadOutcome{err: mismatch}
-		}
-		newAll, err := l.snapshotKnownKeys(tType)
+		changed, err := tr.load(ctx, &candidate)
 		if err != nil {
 			return reloadOutcome{err: err}
 		}
 		live.curr.Store(&candidate)
-		changed := diffSnapshots(prevAll, newAll)
-		prevAll = newAll
-		prevImmutable = newImmutable
 		return reloadOutcome{changed: changed}
 	}
 
@@ -98,8 +75,9 @@ func (l *Live[T]) Get() *T {
 }
 
 // Events returns the channel of [Event] values from the worker — one
-// per reload attempt (success or failure). The channel is closed by
-// [Live.Close].
+// per reload attempt (success or failure), except that a poll-triggered
+// reload that changes nothing delivers none unless the previous reload
+// failed. The channel is closed by [Live.Close].
 //
 // The channel is buffered (capacity 16); a slow consumer drops
 // surplus events. Get() still returns the freshest value, so dropped
@@ -109,8 +87,9 @@ func (l *Live[T]) Events() <-chan Event {
 }
 
 // Reload triggers a synchronous reload through the worker, bypassing
-// the debounce timer. Returns the reload error (validation,
-// immutable, decode) or nil on success.
+// the debounce timer, and delivers its [Event] like any other reload.
+// Returns the reload error (validation, immutable, decode), nil on
+// success, or [ErrWatcherClosed] after [Live.Close].
 func (l *Live[T]) Reload() error {
 	return l.eng.requestReload()
 }

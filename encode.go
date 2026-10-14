@@ -48,7 +48,7 @@ func WithEncodeExport(b bool) EncodeOption {
 }
 
 // WithEncodeIncludeSecrets emits the underlying value of secret-tagged
-// fields instead of the `***` marker. Use only when the destination is
+// and [Secret] fields instead of the `***` marker. Use only when the destination is
 // known to be safe (e.g., piping to a child process via inherited env,
 // not when writing to a public file).
 func WithEncodeIncludeSecrets(b bool) EncodeOption {
@@ -71,7 +71,7 @@ func WithEncodeSort(b bool) EncodeOption {
 // WithCustomMarshaler registers a custom marshaler for type T. Runs at
 // the top of the encoder priority chain, ahead of [Marshaler],
 // [encoding.TextMarshaler], [encoding.BinaryMarshaler], and the
-// built-in registry.
+// built-in encoders.
 func WithCustomMarshaler[T any](fn func(T) (string, error)) EncodeOption {
 	return func(o *encoderOptions) {
 		if o.customMarshalers == nil {
@@ -85,9 +85,14 @@ func WithCustomMarshaler[T any](fn func(T) (string, error)) EncodeOption {
 	}
 }
 
-// Encode writes v to w as a `.env`-format byte stream. Each exported,
-// env-tagged field becomes one line: `KEY=VALUE`. Nil pointer fields
-// and nil slice/map fields are omitted.
+// Encode writes v to w as a `.env`-format byte stream. Each field
+// [Load] would fill becomes one line, `KEY=VALUE`, preceded by its
+// envDesc text as `#` comments. Nil pointer fields and nil slice/map
+// fields are omitted. Secret-tagged fields and [Secret] fields are
+// written as "***" unless [WithEncodeIncludeSecrets] is set. A slice,
+// array or map element that contains its separator (or a map key that
+// contains the key-value separator) fails with [ErrSeparatorInValue],
+// since it would load back as a different value.
 //
 // v may be a struct value or a non-nil pointer to one. Output is
 // sourceable by Bash (with [WithEncodeExport]) and re-parseable by the
@@ -126,8 +131,11 @@ func (l *Loader) Encode(w io.Writer, v any, opts ...EncodeOption) error {
 	return encodeStruct(w, rv, info, l.opts.prefix, opts)
 }
 
-// EncodeFile encodes v to path with mode 0600 (owner-only — these
-// files often hold secrets). Existing files are truncated.
+// EncodeFile encodes v to path. A new file gets mode 0600 (owner-only — these
+// files often hold secrets); an existing file is truncated and keeps its
+// mode. The write is not atomic: a failure part-way can leave a partial
+// file. For an atomic replace, use [Encode] into a buffer and write it with
+// github.com/go-rotini/fs.
 func EncodeFile(path string, v any, opts ...EncodeOption) error {
 	return encodeToFile(path, func(w io.Writer) error { return Encode(w, v, opts...) })
 }
@@ -282,8 +290,10 @@ func (e *encoder) encodeField(root reflect.Value, fd fieldDescriptor) error {
 // (high to low):
 //
 //  1. Custom marshaler from [WithCustomMarshaler].
-//  2. Tag overrides: time.Time + layout= → t.Format(layout); []byte /
-//     [N]byte + base64=/hex= → encoded form.
+//  2. [Secret]: T rendered with the same options, skipping a custom
+//     marshaler for T itself; tag overrides:
+//     time.Time + layout= → t.Format(layout); []byte / [N]byte +
+//     base64/hex → encoded form.
 //  3. [Marshaler] (MarshalEnv).
 //  4. [encoding.TextMarshaler].
 //  5. [encoding.BinaryMarshaler].
@@ -296,7 +306,19 @@ func (e *encoder) renderValue(field reflect.Value, fd fieldDescriptor) (string, 
 	if fn, ok := e.opts.customMarshalers[typ]; ok {
 		return fn(field)
 	}
+	return e.renderUncustomized(field, fd)
+}
 
+// renderUncustomized is renderValue without the custom marshaler for
+// field's own type. A Secret's value goes through it, as Load applies
+// no custom decoder to a Secret's value.
+func (e *encoder) renderUncustomized(field reflect.Value, fd fieldDescriptor) (string, error) {
+	typ := field.Type()
+	if field.CanAddr() {
+		if sc, ok := reflect.TypeAssert[secretCodec](field.Addr()); ok {
+			return sc.renderSecret(e, fd)
+		}
+	}
 	if typ == timeTimeType && fd.Layout != "" {
 		t, _ := reflect.TypeAssert[time.Time](field)
 		return t.Format(fd.Layout), nil
@@ -391,12 +413,18 @@ func (e *encoder) renderReflect(field reflect.Value, fd fieldDescriptor) (string
 func (e *encoder) renderSliceOrArray(field reflect.Value, fd fieldDescriptor) (string, error) {
 	sep := separatorOr(fd.Separator, ",")
 	parts := make([]string, field.Len())
-	elemFD := fieldDescriptor{Layout: fd.Layout}
+	elemFD := fieldDescriptor{GoPath: fd.GoPath, Layout: fd.Layout}
 	for i := range field.Len() {
 		elem := field.Index(i)
 		s, err := e.renderValue(elem, elemFD)
 		if err != nil {
 			return "", err
+		}
+		if strings.Contains(s, sep) {
+			return "", fmt.Errorf("env: field %s: element %d contains separator %q: %w", fd.GoPath, i, sep, ErrSeparatorInValue)
+		}
+		if s == "" && field.Len() == 1 {
+			return "", fmt.Errorf("env: field %s: the only element is empty: %w", fd.GoPath, ErrSeparatorInValue)
 		}
 		parts[i] = s
 	}
@@ -412,7 +440,7 @@ func (e *encoder) renderMap(field reflect.Value, fd fieldDescriptor) (string, er
 	keys := field.MapKeys()
 	rendered := make([]string, 0, len(keys))
 	emptyFD := fieldDescriptor{}
-	valueFD := fieldDescriptor{Layout: fd.Layout}
+	valueFD := fieldDescriptor{GoPath: fd.GoPath, Layout: fd.Layout}
 	for _, k := range keys {
 		kHolder := reflect.New(k.Type())
 		kHolder.Elem().Set(k)
@@ -426,6 +454,9 @@ func (e *encoder) renderMap(field reflect.Value, fd fieldDescriptor) (string, er
 		vStr, err := e.renderValue(vHolder.Elem(), valueFD)
 		if err != nil {
 			return "", err
+		}
+		if strings.Contains(kStr, sep) || strings.Contains(kStr, kvSep) || strings.Contains(vStr, sep) {
+			return "", fmt.Errorf("env: field %s: map entry contains separator %q or %q: %w", fd.GoPath, sep, kvSep, ErrSeparatorInValue)
 		}
 		rendered = append(rendered, kStr+kvSep+vStr)
 	}
@@ -505,7 +536,7 @@ func quoteValue(s string) string {
 func fieldByIndexNoAlloc(root reflect.Value, index []int) (reflect.Value, bool) {
 	v := root
 	for i, idx := range index {
-		if i > 0 && v.Kind() == reflect.Pointer {
+		for i > 0 && v.Kind() == reflect.Pointer {
 			if v.IsNil() {
 				return reflect.Value{}, false
 			}

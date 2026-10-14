@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // --- Describe basics ---
@@ -599,5 +600,78 @@ func TestComposeDescription(t *testing.T) {
 				t.Errorf("got %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestDescribe_SecretDefaultRedacted(t *testing.T) {
+	type cfg struct {
+		Key   string         `env:"KEY,secret,default=hunter2"`
+		Token Secret[string] `env:"TOKEN,default=hunter3"`
+	}
+	docs := Describe(cfg{})
+	for _, d := range docs {
+		if strings.Contains(d.Default, "hunter") {
+			t.Errorf("%s: Default=%q leaks the secret", d.Name, d.Default)
+		}
+		if d.Default == "" {
+			t.Errorf("%s: Default empty, want a redaction marker", d.Name)
+		}
+		if !d.Secret {
+			t.Errorf("%s: Secret=false", d.Name)
+		}
+	}
+	var buf bytes.Buffer
+	if err := PrintUsage(&buf, cfg{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Markdown(&buf, cfg{}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "hunter") {
+		t.Fatalf("usage output leaks a secret default:\n%s", buf.String())
+	}
+}
+
+func TestDescribe_RequireAllMarksRequired(t *testing.T) {
+	type cfg struct {
+		A string `env:"A"`
+		B string `env:"B,default=x"`
+		C string `env:"C,required"`
+	}
+	got := map[string]bool{}
+	for _, d := range Describe(cfg{}, WithRequireAll()) {
+		got[d.Name] = d.Required
+	}
+	if !got["A"] || got["B"] || !got["C"] {
+		t.Fatalf("Required=%v, want A and C required, B not", got)
+	}
+	for _, d := range Describe(cfg{}) {
+		if d.Required != (d.Name == "C") {
+			t.Fatalf("without WithRequireAll: %s Required=%v", d.Name, d.Required)
+		}
+	}
+}
+
+func TestPrintUsage_TruncatesOnRuneBoundary(t *testing.T) {
+	t.Parallel()
+	type C struct {
+		A string `env:"A,default=ééééééééééééééééééééééééééééééééééééééééééééé"`
+		B string `env:"B,default=x"`
+	}
+	var buf bytes.Buffer
+	if err := PrintUsage(&buf, &C{}); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !utf8.ValidString(out) {
+		t.Fatalf("invalid UTF-8: %q", out)
+	}
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	header := utf8.RuneCountInString(lines[0][:strings.Index(lines[0], "REQUIRED")])
+	for _, l := range lines[1:] {
+		runes := []rune(l)
+		if header > len(runes) || (runes[header-1] != ' ') {
+			t.Errorf("misaligned row %q", l)
+		}
 	}
 }

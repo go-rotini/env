@@ -155,3 +155,94 @@ func TestLoad_ExpandTag_Cycle(t *testing.T) {
 		t.Errorf("err = %v, want ErrCycle", err)
 	}
 }
+
+func TestExpandFieldValue_UnterminatedBracesLinear(t *testing.T) {
+	t.Parallel()
+	lk := func(string) (string, bool) { return "", false }
+	text := strings.Repeat("${", 100_000)
+	x := expansion{goPath: "F"}
+	got, err := x.expand(text, lk, nil, 0)
+	if err != nil || got != text {
+		t.Fatalf("got len %d, err %v", len(got), err)
+	}
+	if x.scanned != len(text) {
+		t.Errorf("brace matching visited %d bytes of a %d-byte value, want one pass", x.scanned, len(text))
+	}
+}
+
+func TestExpandFieldValue_DefaultsScannedOnce(t *testing.T) {
+	t.Parallel()
+	lk := func(name string) (string, bool) { return "y", name == "Y" }
+	text := strings.Repeat("${X:-${Y}}", 10_000)
+	x := expansion{goPath: "F"}
+	got, err := x.expand(text, lk, nil, 0)
+	if err != nil || got != strings.Repeat("y", 10_000) {
+		t.Fatalf("got len %d, err %v", len(got), err)
+	}
+	// The value once, then each default once.
+	if want := len(text) + 10_000*len("${Y}"); x.scanned != want {
+		t.Errorf("brace matching visited %d bytes, want %d", x.scanned, want)
+	}
+}
+
+// matchBraceScan is the per-reference scan matchBraces replaces: the
+// index in s of the `}` matching an implicit outer `{`, or -1.
+func matchBraceScan(s string) int {
+	depth := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '\\':
+			i++
+		case '{':
+			depth++
+		case '}':
+			if depth == 0 {
+				return i
+			}
+			depth--
+		}
+	}
+	return -1
+}
+
+func FuzzMatchBraces(f *testing.F) {
+	for _, s := range []string{"${A}", "${a{b ${c}", `${\}}`, "${${${", "x${A:-${B}}y}", `\${A}`} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		closes := matchBraces(s, nil)
+		for i := 0; i+1 < len(s); i++ {
+			if s[i] != '$' || s[i+1] != '{' {
+				continue
+			}
+			want := matchBraceScan(s[i+2:])
+			if want >= 0 {
+				want += i + 2
+			}
+			if got := closes.closeOf(i + 1); got != want {
+				t.Fatalf("%q at %d: matchBraces %d, scan %d", s, i, got, want)
+			}
+		}
+	})
+}
+
+func FuzzExpandFieldValue(f *testing.F) {
+	for _, s := range []string{"$A", "${A}", "${A:-${B:-x}}", "${A:?m}", `\$A`, "${", "${A-}", `${A:-\}}`} {
+		f.Add(s, "va")
+	}
+	f.Fuzz(func(t *testing.T, v, a string) {
+		if len(v) > 4096 {
+			return
+		}
+		lk := func(k string) (string, bool) {
+			switch k {
+			case "A":
+				return a, true
+			case "B":
+				return v, true
+			}
+			return "", false
+		}
+		_, _ = expandFieldValue(v, "F", lk)
+	})
+}

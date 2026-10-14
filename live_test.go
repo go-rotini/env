@@ -1,10 +1,14 @@
 package env_test
 
 import (
+	"context"
 	"errors"
+	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -243,8 +247,10 @@ func TestLive_ImmutableExpandChangeRejected(t *testing.T) {
 	if !errors.As(ev.Err, &ice) {
 		t.Fatalf("ev.Err = %v, want *ImmutableChangedError", ev.Err)
 	}
-	if ice.Old != "h1/db" || ice.New != "h2/db" {
-		t.Errorf("ImmutableChangedError Old/New = %q/%q, want h1/db/h2/db", ice.Old, ice.New)
+	// An expanded value can carry other variables' values, so it is
+	// redacted.
+	if ice.Old != "<redacted: 5 bytes>" || ice.New != "<redacted: 5 bytes>" {
+		t.Errorf("ImmutableChangedError Old/New = %q/%q, want redacted", ice.Old, ice.New)
 	}
 	if live.Get() != old {
 		t.Error("Live installed a new pointer despite immutable rejection")
@@ -444,5 +450,277 @@ func TestLive_PollDrivenReload(t *testing.T) {
 	}
 	if live.Get().Foo != "polled-after" {
 		t.Errorf("after polling: Foo = %q, want polled-after", live.Get().Foo)
+	}
+}
+
+// --- reload correctness ---
+
+// lockedMap is a non-Watcher source whose values a test can change.
+type lockedMap struct {
+	mu sync.Mutex
+	m  map[string]string
+}
+
+func (s *lockedMap) Lookup(k string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, ok := s.m[k]
+	return v, ok
+}
+
+func (s *lockedMap) set(k, v string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.m[k] = v
+}
+
+// flipSource answers "v2" for KEY once after being armed, then "v1":
+// a source that changes between two reads within one reload.
+type flipSource struct{ armed atomic.Bool }
+
+func (s *flipSource) Lookup(k string) (string, bool) {
+	if k != "KEY" {
+		return "", false
+	}
+	if s.armed.CompareAndSwap(true, false) {
+		return "v2", true
+	}
+	return "v1", true
+}
+
+func TestLive_ImmutableChecksTheLoadedValue(t *testing.T) {
+	t.Parallel()
+	type C struct {
+		Key string `env:"KEY,immutable"`
+	}
+	src := &flipSource{}
+	live, err := env.NewLive[C](env.WithSource(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = live.Close() })
+	src.armed.Store(true)
+	if err := live.Reload(); !errors.Is(err, env.ErrImmutableChanged) {
+		t.Fatalf("Reload = %v, want ErrImmutableChanged", err)
+	}
+	if got := live.Get().Key; got != "v1" {
+		t.Errorf("Key = %q, want v1", got)
+	}
+}
+
+func TestLive_ImmutableSeesMutatorResult(t *testing.T) {
+	t.Parallel()
+	type C struct {
+		Key string `env:"KEY,immutable"`
+	}
+	var n atomic.Int32
+	m := env.MutatorFunc(func(_ context.Context, _, _, _, cur string, _ bool) (string, bool, error) {
+		return cur + "-" + strconv.Itoa(int(n.Add(1))), false, nil
+	})
+	live, err := env.NewLive[C](env.WithSource(env.Map(map[string]string{"KEY": "ref"})), env.WithMutator(m))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = live.Close() })
+	if err := live.Reload(); !errors.Is(err, env.ErrImmutableChanged) {
+		t.Fatalf("Reload = %v, want ErrImmutableChanged", err)
+	}
+	if got := live.Get().Key; got != "ref-1" {
+		t.Errorf("Key = %q, want ref-1", got)
+	}
+}
+
+func TestLive_ImmutableSecretTypeRedacted(t *testing.T) {
+	t.Parallel()
+	type C struct {
+		Key env.Secret[string] `env:"KEY,immutable"`
+	}
+	src := &lockedMap{m: map[string]string{"KEY": "oldsecret"}}
+	live, err := env.NewLive[C](env.WithSource(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = live.Close() })
+	src.set("KEY", "newsecret")
+	ic, ok := errors.AsType[*env.ImmutableChangedError](live.Reload())
+	if !ok {
+		t.Fatal("want *ImmutableChangedError")
+	}
+	if strings.Contains(ic.Old+ic.New, "secret") {
+		t.Errorf("Old=%q New=%q leak the value", ic.Old, ic.New)
+	}
+}
+
+func TestLive_UnsetFieldKeptAcrossReloads(t *testing.T) {
+	type C struct {
+		Token string `env:"ENV_TEST_UNSET_TOKEN,unset"`
+		Other string `env:"ENV_TEST_UNSET_OTHER"`
+	}
+	t.Setenv("ENV_TEST_UNSET_TOKEN", "abc")
+	t.Setenv("ENV_TEST_UNSET_OTHER", "1")
+	live, err := env.NewLive[C]()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = live.Close() })
+	if _, ok := os.LookupEnv("ENV_TEST_UNSET_TOKEN"); ok {
+		t.Fatal("unset-tagged variable still in the environment")
+	}
+	t.Setenv("ENV_TEST_UNSET_OTHER", "2")
+	if err := live.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	if got := live.Get(); got.Token != "abc" || got.Other != "2" {
+		t.Errorf("after reload: %+v, want Token=abc Other=2", *got)
+	}
+}
+
+func TestLive_PollAtOrBelowDebounceReloads(t *testing.T) {
+	t.Parallel()
+	type C struct {
+		V string `env:"V"`
+	}
+	src := &lockedMap{m: map[string]string{"V": "a"}}
+	live, err := env.NewLive[C](env.WithSource(src), env.WithPollInterval(20*time.Millisecond),
+		env.WithReloadDebounce(200*time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = live.Close() })
+	src.set("V", "b")
+	select {
+	case ev := <-live.Events():
+		if ev.Err != nil || live.Get().V != "b" {
+			t.Fatalf("event %+v, V=%q", ev, live.Get().V)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("no reload; V=%q", live.Get().V)
+	}
+}
+
+func TestLive_QuietPollEmitsNoEvent(t *testing.T) {
+	t.Parallel()
+	type C struct {
+		V string `env:"V"`
+	}
+	live, err := env.NewLive[C](env.WithSource(&lockedMap{m: map[string]string{"V": "a"}}),
+		env.WithPollInterval(10*time.Millisecond), env.WithReloadDebounce(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = live.Close() })
+	select {
+	case ev := <-live.Events():
+		t.Fatalf("unexpected event %+v", ev)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestLive_SteadyChangesStillReload(t *testing.T) {
+	t.Parallel()
+	src := newPushSource(map[string]string{"FOO": "0"})
+	live, err := env.NewLive[liveCfg](env.WithSource(src), env.WithReloadDebounce(50*time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = live.Close() })
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 1; ; i++ {
+			select {
+			case <-stop:
+				return
+			case <-time.After(10 * time.Millisecond):
+				src.set("FOO", strconv.Itoa(i))
+			}
+		}
+	}()
+	defer func() { close(stop); <-done }()
+	select {
+	case ev := <-live.Events():
+		if ev.Err != nil {
+			t.Fatal(ev.Err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("a steady stream of changes postponed the reload indefinitely")
+	}
+}
+
+type failingWatcher struct{}
+
+func (failingWatcher) Lookup(string) (string, bool) { return "", false }
+
+func (failingWatcher) Watch(context.Context) (<-chan env.Change, error) {
+	return nil, errors.New("subscribe refused")
+}
+
+func TestLive_SubscribeFailureReported(t *testing.T) {
+	t.Parallel()
+	live, err := env.NewLive[liveCfg](env.WithSource(failingWatcher{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = live.Close() })
+	select {
+	case ev := <-live.Events():
+		if ev.Err == nil || !strings.Contains(ev.Err.Error(), "subscribe refused") {
+			t.Fatalf("event %+v, want subscribe error", ev)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("subscribe failure not reported")
+	}
+}
+
+func TestLive_PollRecoveryEmitsEvent(t *testing.T) {
+	t.Parallel()
+	type C struct {
+		N int `env:"N"`
+	}
+	src := &lockedMap{m: map[string]string{"N": "1"}}
+	live, err := env.NewLive[C](env.WithSource(src), env.WithPollInterval(10*time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = live.Close() })
+	src.set("N", "bad")
+	if ev := awaitEvent(t, live.Events(), "failed poll"); ev.Err == nil {
+		t.Fatalf("event %+v, want Err", ev)
+	}
+	src.set("N", "1")
+	for {
+		ev := awaitEvent(t, live.Events(), "recovery")
+		if ev.Err == nil {
+			if len(ev.Changed) != 0 {
+				t.Errorf("recovery Changed = %v, want none", ev.Changed)
+			}
+			return
+		}
+	}
+}
+
+func TestLive_ImmutableMutatorValueRedacted(t *testing.T) {
+	t.Parallel()
+	type C struct {
+		Pass string `env:"PASS,immutable"`
+	}
+	resolve := env.MutatorFunc(func(_ context.Context, _, _, _, cur string, _ bool) (string, bool, error) {
+		return strings.Replace(cur, "vault:", "resolved-", 1), false, nil
+	})
+	src := newPushSource(map[string]string{"PASS": "vault:one"})
+	live, err := env.NewLive[C](env.WithSource(src), env.WithMutator(resolve), env.WithReloadDebounce(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = live.Close() })
+	src.set("PASS", "vault:two")
+	ev := awaitEvent(t, live.Events(), "immutable change")
+	ice, ok := errors.AsType[*env.ImmutableChangedError](ev.Err)
+	if !ok {
+		t.Fatalf("ev.Err = %v, want *ImmutableChangedError", ev.Err)
+	}
+	if strings.Contains(ice.Old+ice.New, "resolved") {
+		t.Errorf("Old/New = %q/%q, want redacted", ice.Old, ice.New)
 	}
 }

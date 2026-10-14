@@ -9,10 +9,10 @@ This package is used as the default environment-variable support package for [ro
 - One-line happy path: `env.Load(&cfg)` is enough for most programs
 - `encoding/json`-shaped API: single comma-separated `env:"NAME,opt1,opt2"` tag, generic `LoadTo[T]` convenience, a configurable `Loader` (the `Decoder`-style entry point) for advanced cases
 - Aggregated multi-error reporting with per-field attribution (`*MultiError`, `FormatError`)
-- Principled `Source` interface: `OSEnv()`, `Map`, `Multi(...)` built in; `.env` parsing via [go-rotini/dotenv](https://github.com/go-rotini/dotenv); remote secret backends in their own modules — all equal citizens
+- Principled `Source` interface: `OSEnv()`, `Map`, `Multi(...)` built in; `.env` parsing via [go-rotini/dotenv](https://github.com/go-rotini/dotenv); any other store (such as a secret manager) plugs in by implementing `Source`
 - `context.Context` support: `LoadContext` threads the context to mutators and to `UnmarshalerContext` / `ValidatorContext` hooks
 - Atomic, lock-free reads on reload via `Live[T]` and `sync/atomic.Pointer`
-- Per-field `immutable` enforcement: reload candidates that change a marked field are rejected (old/new values redacted for `secret` fields)
+- Per-field `immutable` enforcement: reload candidates that change a marked field are rejected (old/new values redacted for secret, `fromFile` and `expand` fields, and for every field when a mutator is set)
 - Secret-redacting output (`String()`, `Describe`, `PrintUsage`, `Markdown`, `Encode`) plus a `Secret[T]` wrapper integrating with `slog.LogValuer`
 - Variable expansion on tagged values (`expand` tag): `$VAR`, `${VAR}`, `${VAR-default}`, `${VAR:-default}`, `${VAR:?error}` — references resolve against the source chain, used verbatim (no `WithPrefix` applied)
 - Built-in support for `time.Duration`, `time.Time`, `*time.Location`, `url.URL`, `net.IP`, `*net.IPNet`, `regexp.Regexp`, `[]byte` (raw, base64, hex), plus `encoding.TextUnmarshaler` and `encoding.BinaryUnmarshaler` interop
@@ -132,7 +132,8 @@ file watcher — it debounces editor save bursts and handles the "atomic save"
 pattern (write-temp-then-rename) by watching the parent directory and filtering
 by filename. The reload pipeline parses + validates a fresh candidate before
 swapping; a failed candidate retains the previous value and emits an error
-event.
+event. A poll that finds nothing changed emits no event, unless the previous
+reload failed.
 
 ## Auto-generated documentation
 

@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // --- Secret[T] basics ---
@@ -173,18 +175,25 @@ func TestSecret_UnmarshalEnv_ParseError(t *testing.T) {
 	}
 }
 
-// --- encoder integration: MarshalEnv (when secret tag is NOT set) ---
+// --- encoder integration: Secret without the secret tag ---
 
 type secretWrapperConfig struct {
 	Token Secret[string] `env:"TOKEN"`
 }
 
 func TestSecret_Encode_WithoutSecretTag(t *testing.T) {
-	// Without the secret tag, the encoder calls MarshalEnv on the
-	// wrapper, which renders the inner T's value via fmt.Sprint.
+	// A Secret field is redacted even without the secret tag;
+	// WithEncodeIncludeSecrets writes the MarshalEnv value.
 	c := secretWrapperConfig{Token: NewSecret("the-real-token")}
 	var buf bytes.Buffer
 	if err := Encode(&buf, c); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "TOKEN=***") {
+		t.Errorf("expected redaction:\n%s", buf.String())
+	}
+	buf.Reset()
+	if err := Encode(&buf, c, WithEncodeIncludeSecrets(true)); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(buf.String(), "TOKEN=the-real-token") {
@@ -332,5 +341,126 @@ func TestSecret_HappyPathLeavesValueIntact(t *testing.T) {
 	}
 	if c.APIKey != "real-secret" {
 		t.Errorf("APIKey = %q (loader should not redact the field value)", c.APIKey)
+	}
+}
+
+func TestSecret_FormatAllVerbs(t *testing.T) {
+	type cfg struct {
+		Port  Secret[int]
+		Token Secret[string]
+		On    Secret[bool]
+	}
+	c := cfg{NewSecret(31337), NewSecret("hunter2"), NewSecret(true)}
+	for _, verb := range []string{"%d", "%t", "%o", "%b", "%e", "%f", "%10d", "%x", "%X", "%+v", "%#v", "%v", "%s", "%q"} {
+		for _, v := range []any{c.Port, c.Token, c.On, c} {
+			got := fmt.Sprintf(verb, v)
+			if strings.Contains(got, "31337") || strings.Contains(got, "hunter2") || strings.Contains(got, "true") {
+				t.Errorf("Sprintf(%q, %T) = %q leaks the value", verb, v, got)
+			}
+		}
+	}
+	if got := fmt.Sprintf("%12d|%-12v|", c.Port, c.Port); got != "  <redacted>|<redacted>  |" {
+		t.Errorf("width = %q", got)
+	}
+}
+
+// secretVerbs holds the verbs fmt formats by reflection for a Secret
+// without calling Format; a variable keeps vet from flagging %w.
+var secretVerbs = []string{"%p", "%w"}
+
+// TestSecret_RejectedVerbsPrintTheValue records the documented limit:
+// %p and %w print the value, because fmt formats them by reflection
+// without calling Format. go vet reports %w but not %p, since Secret
+// implements fmt.Formatter.
+func TestSecret_RejectedVerbsPrintTheValue(t *testing.T) {
+	s := NewSecret("hunter2")
+	for _, verb := range secretVerbs {
+		if got := fmt.Sprintf(verb, s); !strings.Contains(got, "%!") {
+			t.Errorf("%q = %q; fmt no longer rejects it, so update the Secret godoc", verb, got)
+		}
+	}
+}
+
+func TestSecret_EqualityComparesValues(t *testing.T) {
+	type cfg struct {
+		Token Secret[string]
+		Port  int
+	}
+	if NewSecret("a") != NewSecret("a") || NewSecret("a") == NewSecret("b") {
+		t.Error("== on Secrets does not compare values")
+	}
+	var loaded cfg
+	if err := loaded.Token.UnmarshalEnv("a"); err != nil {
+		t.Fatal(err)
+	}
+	if loaded != (cfg{Token: NewSecret("a")}) {
+		t.Error("configs holding equal Secrets compare unequal")
+	}
+}
+
+func TestSecret_TagOptionsApplied(t *testing.T) {
+	type cfg struct {
+		Key  Secret[[]byte]    `env:"KEY,base64"`
+		Hex  Secret[[]byte]    `env:"HEX,hex"`
+		List Secret[[]string]  `env:"LIST,separator=;"`
+		Day  Secret[time.Time] `env:"DAY,layout=2006-01-02"`
+	}
+	src := Map(map[string]string{"KEY": "aGVsbG8=", "HEX": "6869", "LIST": "a;b", "DAY": "2026-10-12"})
+	var c cfg
+	if err := New(WithSource(src)).Load(&c); err != nil {
+		t.Fatal(err)
+	}
+	if string(c.Key.Value()) != "hello" || string(c.Hex.Value()) != "hi" ||
+		!slices.Equal(c.List.Value(), []string{"a", "b"}) ||
+		!c.Day.Value().Equal(time.Date(2026, 10, 12, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("loaded %q %q %q %v", c.Key.Value(), c.Hex.Value(), c.List.Value(), c.Day.Value())
+	}
+	out := encodeToString(t, c, WithEncodeIncludeSecrets(true), WithEncodeSort(true))
+	want := "DAY=2026-10-12\nHEX=6869\nKEY=aGVsbG8=\nLIST=a;b\n"
+	if out != want {
+		t.Errorf("Encode = %q, want %q", out, want)
+	}
+}
+
+func TestSecret_UntaggedFieldLoads(t *testing.T) {
+	type cfg struct {
+		Token Secret[string]
+		Plain string
+	}
+	var c cfg
+	l := New(WithSource(Map(map[string]string{"TOKEN": "x", "PLAIN": "y"})))
+	if err := l.Load(&c); err != nil || c.Token.Value() != "x" {
+		t.Fatalf("Load = %v, Token = %q; want x", err, c.Token.Value())
+	}
+	docs := l.Describe(&c)
+	if len(docs) != 2 || docs[0].Name != "TOKEN" || !docs[0].Secret {
+		t.Errorf("Describe = %+v, want a secret TOKEN row", docs)
+	}
+}
+
+func TestLoader_SecretAssertionMessageDropped(t *testing.T) {
+	type cfg struct {
+		E string `env:"E,secret,expand"`
+		P string `env:"P,expand"`
+	}
+	src := Map(map[string]string{"E": "${MISSING:?no $TOK}", "P": "${MISSING:?no $TOK}", "TOK": "s3cretE"})
+	err := New(WithSource(src)).Load(&cfg{})
+	if !errors.Is(err, ErrExpansionAssertion) {
+		t.Fatalf("Load = %v, want ErrExpansionAssertion", err)
+	}
+	var secretErr, plainErr string
+	for _, e := range err.(interface{ Unwrap() []error }).Unwrap() {
+		switch {
+		case strings.Contains(e.Error(), "field E:"):
+			secretErr = fmt.Sprintf("%+v", e)
+		case strings.Contains(e.Error(), "field P:"):
+			plainErr = e.Error()
+		}
+	}
+	if secretErr == "" || strings.Contains(secretErr, "s3cretE") || !strings.Contains(secretErr, `"MISSING"`) {
+		t.Errorf("secret field error = %q", secretErr)
+	}
+	if !strings.Contains(plainErr, "no s3cretE") {
+		t.Errorf("plain field error = %q, want the expanded message", plainErr)
 	}
 }

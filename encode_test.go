@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"net/url"
@@ -12,6 +13,7 @@ import (
 	"reflect"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1369,5 +1371,124 @@ func TestEncode_MapKeyError(t *testing.T) {
 	err := Encode(&buf, c)
 	if !errors.Is(err, ErrUnsupportedType) {
 		t.Errorf("err = %v, want ErrUnsupportedType", err)
+	}
+}
+
+func TestEncode_SecretWrapperRedactedWithoutTag(t *testing.T) {
+	type cfg struct {
+		Token  Secret[string]  `env:"TOKEN"`
+		PToken *Secret[string] `env:"P_TOKEN"`
+	}
+	p := NewSecret("hunter3")
+	v := cfg{Token: NewSecret("hunter2"), PToken: &p}
+	var buf bytes.Buffer
+	if err := Encode(&buf, v); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if strings.Contains(out, "hunter") {
+		t.Fatalf("Encode leaked a Secret value:\n%s", out)
+	}
+	if !strings.Contains(out, "TOKEN=***") || !strings.Contains(out, "P_TOKEN=***") {
+		t.Fatalf("want redacted lines:\n%s", out)
+	}
+	buf.Reset()
+	if err := Encode(&buf, v, WithEncodeIncludeSecrets(true)); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "TOKEN=hunter2") {
+		t.Fatalf("WithEncodeIncludeSecrets lost the value:\n%s", buf.String())
+	}
+}
+
+func TestEncode_SecretContainersRedacted(t *testing.T) {
+	t.Parallel()
+	c := struct {
+		Tokens []Secret[string]          `env:"TOKENS"`
+		ByHost map[string]Secret[string] `env:"BY_HOST"`
+	}{
+		Tokens: []Secret[string]{NewSecret("s3cretA")},
+		ByHost: map[string]Secret[string]{"a": NewSecret("s3cretC")},
+	}
+	var buf bytes.Buffer
+	if err := Encode(&buf, &c); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "s3cret") {
+		t.Errorf("secret leaked:\n%s", buf.String())
+	}
+	for _, d := range Describe(&c) {
+		if !d.Secret {
+			t.Errorf("%s not marked secret", d.Name)
+		}
+	}
+}
+
+func TestEncode_SeparatorInElement(t *testing.T) {
+	t.Parallel()
+	for name, v := range map[string]any{
+		"slice": &struct{ L []string }{L: []string{"a,b", "c"}},
+		"custom sep": &struct {
+			L []string `env:"L,separator=;"`
+		}{L: []string{"a;b"}},
+		"map key":   &struct{ M map[string]string }{M: map[string]string{"k:1": "v"}},
+		"map value": &struct{ M map[string]string }{M: map[string]string{"k": "v,w"}},
+	} {
+		if err := Encode(io.Discard, v); !errors.Is(err, ErrSeparatorInValue) {
+			t.Errorf("%s: Encode = %v, want ErrSeparatorInValue", name, err)
+		}
+	}
+	ok := &struct{ M map[string]string }{M: map[string]string{"k": "v:w"}}
+	if err := Encode(io.Discard, ok); err != nil {
+		t.Errorf("kv separator in a map value loads back fine: %v", err)
+	}
+}
+
+func TestEncode_SingleEmptyArrayElementRejected(t *testing.T) {
+	t.Parallel()
+	type cfg struct {
+		A [1]string `env:"A"`
+	}
+	if err := Encode(io.Discard, cfg{A: [1]string{""}}); !errors.Is(err, ErrSeparatorInValue) {
+		t.Errorf("Encode([1]string{\"\"}) = %v, want ErrSeparatorInValue", err)
+	}
+}
+
+func TestEncode_SecretSkipsCustomMarshalerForValue(t *testing.T) {
+	t.Parallel()
+	type cfg struct {
+		S Secret[string] `env:"S"`
+		P string         `env:"P"`
+	}
+	var buf bytes.Buffer
+	err := Encode(&buf, cfg{S: NewSecret("ab"), P: "ab"}, WithEncodeIncludeSecrets(true),
+		WithCustomMarshaler(func(s string) (string, error) { return strings.ToUpper(s), nil }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := buf.String(), "S=ab\nP=AB\n"; got != want {
+		t.Errorf("Encode = %q, want %q", got, want)
+	}
+}
+
+func TestEncode_SingleEmptyElementRejected(t *testing.T) {
+	t.Parallel()
+	type cfg struct {
+		L []string `env:"L"`
+	}
+	if err := Encode(io.Discard, cfg{L: []string{""}}); !errors.Is(err, ErrSeparatorInValue) {
+		t.Errorf("Encode([]string{\"\"}) = %v, want ErrSeparatorInValue", err)
+	}
+	for _, l := range [][]string{{}, {"", ""}, {"a"}} {
+		var buf bytes.Buffer
+		if err := Encode(&buf, cfg{L: l}); err != nil {
+			t.Errorf("Encode(%q) = %v", l, err)
+			continue
+		}
+		var out cfg
+		val := strings.TrimSuffix(strings.TrimPrefix(buf.String(), "L="), "\n")
+		if err := New(WithSource(Map(map[string]string{"L": val}))).Load(&out); err != nil || !slices.Equal(out.L, l) {
+			t.Errorf("%q round trip = %q, %v", l, out.L, err)
+		}
 	}
 }

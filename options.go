@@ -90,8 +90,9 @@ func WithSourcePrepend(src Source) Option {
 	}
 }
 
-// WithPrefix prepends prefix to every resolved env-var name. Applied
-// before any tag-supplied envPrefix on nested struct fields.
+// WithPrefix prepends prefix to every resolved env-var name, ahead of
+// any envPrefix accumulated from nested struct fields. It does not apply
+// to `expand` references.
 func WithPrefix(prefix string) Option {
 	return func(o *loaderOptions) {
 		o.prefix = prefix
@@ -99,11 +100,11 @@ func WithPrefix(prefix string) Option {
 }
 
 // WithTagName overrides the struct tag name the loader recognizes
-// (default "env"). Set to "envconfig" for caarlos0/envconfig-style
-// migrations. Does not affect the envDesc / envPrefix companion tags.
+// (default "env"), for structs already tagged under another name. The
+// tag grammar stays the same. Does not affect the envDesc / envPrefix
+// companion tags.
 //
-// Loaders with a non-default tag name bypass the per-type field-info
-// cache and re-walk the struct on every Load.
+// The loader walks each struct type once and caches the result.
 func WithTagName(name string) Option {
 	return func(o *loaderOptions) {
 		o.tagName = name
@@ -114,8 +115,8 @@ func WithTagName(name string) Option {
 // transform for fields without an explicit tag name. fn receives the
 // Go field name and returns the env-var name.
 //
-// Loaders with a custom transform bypass the per-type field-info cache
-// and re-walk the struct on every Load.
+// The loader walks each struct type once and caches the result, so fn
+// should be a pure function of its argument.
 func WithFieldNameTransform(fn func(goFieldName string) string) Option {
 	return func(o *loaderOptions) {
 		if fn != nil {
@@ -125,8 +126,8 @@ func WithFieldNameTransform(fn func(goFieldName string) string) Option {
 }
 
 // WithRequireAll inverts the default optional-by-default policy: every
-// untagged field becomes implicitly required unless it has a default=
-// tag option.
+// field becomes required unless it has a default= tag option.
+// [FieldDoc.Required] reflects it.
 func WithRequireAll() Option {
 	return func(o *loaderOptions) {
 		o.requireAll = true
@@ -141,7 +142,7 @@ func WithLogger(l *slog.Logger) Option {
 	}
 }
 
-// WithMutator registers one or more [Mutator]s in chain order. May be
+// WithMutator registers one or more [Mutator] values in chain order. May be
 // called multiple times to extend the chain. The chain runs once per
 // field, after source lookup and default application, before decoding.
 func WithMutator(m ...Mutator) Option {
@@ -150,12 +151,15 @@ func WithMutator(m ...Mutator) Option {
 	}
 }
 
-// WithSecretRedactor overrides the redaction function applied to
-// secret-tagged field values surfacing in error messages and
-// [Describe] / [PrintUsage] / [Markdown] output. The default returns
-// "<redacted: N bytes>" (or "<redacted>" for empty). Pass nil to
-// restore the default. The encoder's separate "***" marker is
-// unaffected.
+// WithSecretRedactor overrides the redaction function applied to the
+// values of secret fields (tagged secret, or of a [Secret] type or a
+// container of one) in [*ParseError] and [*ImmutableChangedError], to
+// immutable fromFile and expand values (and every immutable value when
+// a [Mutator] is set) in [*ImmutableChangedError], and to secret
+// fields' defaults in [Describe], [PrintUsage] and [Markdown]. The
+// default returns "<redacted: N bytes>" (or "<redacted>" for empty).
+// Pass nil to restore the default. The encoder's separate "***" marker
+// is unaffected.
 func WithSecretRedactor(fn func(value string) string) Option {
 	return func(o *loaderOptions) {
 		if fn == nil {
@@ -205,8 +209,11 @@ func WithReloadDebounce(d time.Duration) Option {
 // WithCustomDecoder registers a custom decoder for type T. Runs at the
 // top of the decoder priority chain, ahead of [Unmarshaler],
 // [encoding.TextUnmarshaler], [encoding.BinaryUnmarshaler], and the
-// built-in registry. fn receives the resolved string and a pointer to
-// the destination of type T.
+// built-in decoders. fn receives the resolved string and a pointer to
+// the destination of type T. It applies to fields of exactly type T,
+// not to slice elements or map keys and values. An error fn returns is
+// reported as the Cause of a [*ParseError] carrying the field and key;
+// for a secret field the value is redacted and the Cause dropped.
 func WithCustomDecoder[T any](fn func(s string, dst *T) error) Option {
 	return func(o *loaderOptions) {
 		if o.customDecoders == nil {

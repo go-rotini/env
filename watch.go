@@ -11,7 +11,9 @@ import (
 
 // Event is delivered on the channel returned by [Loader.Watch] or by
 // [Live.Events]. One Event corresponds to one reload attempt —
-// successful or failed.
+// successful or failed — except that a poll that changes nothing
+// delivers none (unless the previous reload failed), and a [Watcher] source that fails to subscribe
+// delivers one with Err set.
 type Event struct {
 	// Changed lists the env-var names whose resolved values differ
 	// from the snapshot taken before this reload, sorted and
@@ -30,8 +32,8 @@ type Event struct {
 // goroutine has already exited.
 var ErrWatcherClosed = errors.New("env: watcher closed")
 
-// ErrNilContext is returned when a watch / load call receives a nil
-// context.
+// ErrNilContext is returned when [Loader.LoadContext] or [Loader.Watch]
+// receives a nil context.
 var ErrNilContext = errors.New("env: nil context")
 
 // Watch starts live reload. v must be a non-nil pointer to a struct
@@ -40,11 +42,17 @@ var ErrNilContext = errors.New("env: nil context")
 //
 // On every change pushed by a [Watcher] source — or on every poll
 // tick when [WithPollInterval] is set — Watch builds a fresh
-// candidate of v's type, runs the full load pipeline, compares the
-// candidate's immutable-tagged values against the previous reload's
-// snapshot, and on success overwrites *v. One [Event] is delivered
-// per reload attempt; failures (validation, immutable, decode) deliver
-// an Event with Err set and leave *v unmodified.
+// candidate of v's type, runs the full load pipeline (mutators and
+// fromFile reads included), compares the candidate's immutable-tagged
+// values against the previous load, and on success overwrites *v. One
+// [Event] is delivered per reload attempt; failures (validation,
+// immutable, decode) deliver an Event with Err set and leave *v
+// unmodified. A poll-triggered reload that succeeds without changing
+// any value delivers no Event, unless the previous reload failed. A [Watcher] source whose subscription
+// fails is reported as an Event with Err set.
+//
+// Values of unset-tagged fields that the first load removed from the
+// process environment are kept and reused by every reload.
 //
 // The channel is closed when ctx is canceled.
 //
@@ -54,46 +62,20 @@ func (l *Loader) Watch(ctx context.Context, v any) (<-chan Event, error) {
 	if ctx == nil {
 		return nil, ErrNilContext
 	}
-	if err := l.LoadContext(ctx, v); err != nil {
+	tr, err := l.newTracker(ctx, v)
+	if err != nil {
 		return nil, err
 	}
-
 	rv := reflect.ValueOf(v)
-	if rv.Kind() != reflect.Pointer || rv.IsNil() {
-		return nil, fmt.Errorf("env.Watch: %w", ErrNilPointer)
-	}
 	elemType := rv.Elem().Type()
-
-	prevImmutable, immMeta, err := l.snapshotImmutable(elemType)
-	if err != nil {
-		return nil, err
-	}
-	prevAll, err := l.snapshotKnownKeys(elemType)
-	if err != nil {
-		return nil, err
-	}
-	redact := l.redactor()
 
 	reload := func(ctx context.Context, _ []string) reloadOutcome {
 		candidate := reflect.New(elemType)
-		if err := l.LoadContext(ctx, candidate.Interface()); err != nil {
-			return reloadOutcome{err: err}
-		}
-		newImmutable, _, err := l.snapshotImmutable(elemType)
-		if err != nil {
-			return reloadOutcome{err: err}
-		}
-		if mismatch := compareImmutable(prevImmutable, newImmutable, immMeta, redact); mismatch != nil {
-			return reloadOutcome{err: mismatch}
-		}
-		newAll, err := l.snapshotKnownKeys(elemType)
+		changed, err := tr.load(ctx, candidate.Interface())
 		if err != nil {
 			return reloadOutcome{err: err}
 		}
 		rv.Elem().Set(candidate.Elem())
-		changed := diffSnapshots(prevAll, newAll)
-		prevAll = newAll
-		prevImmutable = newImmutable
 		return reloadOutcome{changed: changed}
 	}
 
@@ -165,6 +147,7 @@ func (e *engine) start(ctx context.Context) {
 		sub, err := w.Watch(ctx)
 		if err != nil {
 			e.logger.Warn("env: watcher source subscribe failed", "err", err)
+			e.emit(Event{Err: fmt.Errorf("env: watcher source subscribe: %w", err), Time: time.Now()})
 			continue
 		}
 		go e.forwardChanges(ctx, sub)
@@ -202,27 +185,19 @@ func (e *engine) run(ctx context.Context) {
 	defer close(e.events)
 
 	debounce := e.loader.opts.reloadDebounce
+	// maxWait bounds how long a steady stream of Watcher changes can
+	// postpone a reload.
+	maxWait := maxDebounceWaits * debounce
 	pendingKeys := make(map[string]struct{})
 
 	var debTimer *time.Timer
 	var debC <-chan time.Time
-	armDeb := func() {
-		if debounce == 0 {
-			return
+	var burstStart time.Time
+	stopDeb := func() {
+		if debTimer != nil {
+			debTimer.Stop()
 		}
-		if debTimer == nil {
-			debTimer = time.NewTimer(debounce)
-			debC = debTimer.C
-			return
-		}
-		if !debTimer.Stop() {
-			select {
-			case <-debTimer.C:
-			default:
-			}
-		}
-		debTimer.Reset(debounce)
-		debC = debTimer.C
+		debC = nil
 	}
 
 	var pollC <-chan time.Time
@@ -232,10 +207,15 @@ func (e *engine) run(ctx context.Context) {
 		pollC = t.C
 	}
 
-	fire := func() {
+	reloadNow := func() reloadOutcome {
+		stopDeb()
 		keys := keysOf(pendingKeys)
 		pendingKeys = make(map[string]struct{})
-		out := e.reload(ctx, keys)
+		return e.reload(ctx, keys)
+	}
+	lastFailed := false // whether the last published reload failed
+	publish := func(out reloadOutcome) {
+		lastFailed = out.err != nil
 		e.emit(Event{
 			Changed: out.changed,
 			Err:     out.err,
@@ -246,9 +226,7 @@ func (e *engine) run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			if debTimer != nil {
-				debTimer.Stop()
-			}
+			stopDeb()
 			return
 
 		case ch, ok := <-e.sourceCh:
@@ -259,38 +237,46 @@ func (e *engine) run(ctx context.Context) {
 				pendingKeys[k] = struct{}{}
 			}
 			if debounce == 0 {
-				fire()
+				publish(reloadNow())
 				continue
 			}
-			armDeb()
+			now := time.Now()
+			if debC == nil {
+				burstStart = now
+			} else if now.Sub(burstStart) >= maxWait {
+				publish(reloadNow())
+				continue
+			}
+			if debTimer == nil {
+				debTimer = time.NewTimer(debounce)
+			} else {
+				debTimer.Reset(debounce)
+			}
+			debC = debTimer.C
 
 		case <-pollC:
-			if debounce == 0 {
-				fire()
-				continue
+			// A tick already ends a quiet period; debouncing it would
+			// starve reloads when the interval is at or below the
+			// debounce. A quiet poll emits no Event unless it follows a
+			// failed reload, so consumers see the failure clear.
+			if out := reloadNow(); out.err != nil || len(out.changed) > 0 || lastFailed {
+				publish(out)
 			}
-			armDeb()
 
 		case <-debC:
-			fire()
-			debC = nil
+			publish(reloadNow())
 
 		case req := <-e.manualCh:
-			if debTimer != nil {
-				debTimer.Stop()
-				debC = nil
-			}
-			out := e.reload(ctx, keysOf(pendingKeys))
-			pendingKeys = make(map[string]struct{})
-			e.emit(Event{
-				Changed: out.changed,
-				Err:     out.err,
-				Time:    time.Now(),
-			})
+			out := reloadNow()
+			publish(out)
 			req.resp <- out.err
 		}
 	}
 }
+
+// maxDebounceWaits is how many debounce periods a burst of Watcher
+// changes may last before the engine reloads anyway.
+const maxDebounceWaits = 10
 
 // emit delivers ev to the events channel non-blockingly; surplus
 // events are dropped (with a warning) when the consumer falls behind.
@@ -327,84 +313,59 @@ func keysOf(m map[string]struct{}) []string {
 	return out
 }
 
-// immutableMeta is the per-key field metadata [snapshotImmutable]
-// carries so [compareImmutable] can fill in field context and redact
-// secret-tagged values in any [*ImmutableChangedError] it builds.
+// immutableMeta is the per-key field metadata [compareImmutable] uses
+// to fill in field context and redact values in any
+// [*ImmutableChangedError] it builds.
 type immutableMeta struct {
 	goPath string
-	secret bool
+	redact bool
 }
 
-// snapshotImmutable captures the resolved values of every
-// immutable-tagged field of t, plus each key's field metadata. Unset /
-// no-default keys take the [unsetSentinel] so the comparison can
-// distinguish set-to-empty from missing. The returned meta map is a
-// pure function of t (no source values) — capture it once.
-func (l *Loader) snapshotImmutable(t reflect.Type) (values map[string]string, meta map[string]immutableMeta, err error) {
-	for t.Kind() == reflect.Pointer {
-		t = t.Elem()
-	}
-	info, err := l.structInfo(t)
-	if err != nil {
-		return nil, nil, err
-	}
-	src := l.composedSource()
-	values = make(map[string]string, len(info.Fields))
-	meta = make(map[string]immutableMeta, len(info.Fields))
-	for _, fd := range info.Fields {
-		if !fd.Immutable {
-			continue
-		}
-		key := l.opts.prefix + fd.Key
-		meta[key] = immutableMeta{goPath: fd.GoPath, secret: fd.Secret}
-		values[key] = l.resolvedSnapshotValue(src, fd, key)
-	}
-	return values, meta, nil
+// reloadTracker carries what one [Loader.Watch] or [Live] compares
+// across reloads. It is used only by the engine goroutine after the
+// initial load.
+type reloadTracker struct {
+	l         *Loader
+	prev      map[string]string // the values of the last installed load
+	retained  map[string]string // see loadState.retained
+	immutable map[string]immutableMeta
+	redact    func(string) string
 }
 
-// snapshotKnownKeys captures the resolved values of every field of t
-// for change detection across reloads.
-func (l *Loader) snapshotKnownKeys(t reflect.Type) (map[string]string, error) {
-	for t.Kind() == reflect.Pointer {
-		t = t.Elem()
-	}
-	info, err := l.structInfo(t)
-	if err != nil {
+// newTracker performs the initial load into v and returns a tracker
+// seeded from it.
+func (l *Loader) newTracker(ctx context.Context, v any) (*reloadTracker, error) {
+	tr := &reloadTracker{l: l, retained: make(map[string]string), redact: l.redactor()}
+	st := &loadState{values: make(map[string]string), retained: tr.retained}
+	if err := l.load(ctx, v, st); err != nil {
 		return nil, err
 	}
-	src := l.composedSource()
-	out := make(map[string]string, len(info.Fields))
-	for _, fd := range info.Fields {
-		key := l.opts.prefix + fd.Key
-		out[key] = l.resolvedSnapshotValue(src, fd, key)
-	}
-	return out, nil
-}
-
-// resolvedSnapshotValue is the value the snapshot maps record for fd:
-// the source value if present, else the default= value, else the
-// [unsetSentinel]. For `expand`-tagged fields the result is the
-// post-expansion value, so a change in a referenced variable is visible
-// to change detection and to the immutable comparison even when the
-// field's own raw value did not change. Expansion errors fall back to
-// the raw value — a load that would hit such an error fails before the
-// snapshot is consulted.
-func (l *Loader) resolvedSnapshotValue(src Source, fd fieldDescriptor, key string) string {
-	var v string
-	switch sv, ok := src.Lookup(key); {
-	case ok:
-		v = sv
-	case fd.HasDefault:
-		v = fd.DefaultValue
-	default:
-		return unsetSentinel
-	}
-	if fd.Expand {
-		if ev, err := expandFieldValue(v, fd.GoPath, src.Lookup); err == nil {
-			v = ev
+	info, keys := l.fields(reflect.TypeOf(v).Elem())
+	tr.immutable = make(map[string]immutableMeta)
+	for i, fd := range info.Fields {
+		if fd.Immutable {
+			tr.immutable[l.key(keys, i, fd)] = immutableMeta{goPath: fd.GoPath, redact: fd.Secret || fd.FromFile || fd.Expand || len(l.opts.mutators) > 0}
 		}
 	}
-	return v
+	tr.prev = st.values
+	return tr, nil
+}
+
+// load loads a reload candidate into v, rejects it when an immutable
+// field's value changed, and otherwise records it as the installed
+// state and returns the keys whose values changed. The comparison uses
+// the very strings the candidate was decoded from.
+func (tr *reloadTracker) load(ctx context.Context, v any) ([]string, error) {
+	st := &loadState{values: make(map[string]string, len(tr.prev)), retained: tr.retained}
+	if err := tr.l.load(ctx, v, st); err != nil {
+		return nil, err
+	}
+	if err := compareImmutable(tr.prev, st.values, tr.immutable, tr.redact); err != nil {
+		return nil, err
+	}
+	changed := diffSnapshots(tr.prev, st.values)
+	tr.prev = st.values
+	return changed, nil
 }
 
 // unsetSentinel marks "no source value, no default" so the immutable
@@ -412,39 +373,41 @@ func (l *Loader) resolvedSnapshotValue(src Source, fd fieldDescriptor, key strin
 const unsetSentinel = "\x00<unset>\x00"
 
 // compareImmutable returns a non-nil [*ImmutableChangedError] when next
-// differs from prev on any immutable key. Old/New are made human-
-// readable (the unset sentinel renders as "<unset>") and, for
-// secret-tagged fields, run through redact.
+// differs from prev on an immutable key, checking keys in sorted order.
+// Old/New are made human-readable (the unset sentinel renders as
+// "<unset>") and, for fields marked to redact, run through redact.
 func compareImmutable(prev, next map[string]string, meta map[string]immutableMeta, redact func(string) string) error {
-	mkErr := func(key, oldV, newV string) error {
+	keys := make([]string, 0, len(meta))
+	for k := range meta {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, key := range keys {
+		oldV, newV := snapshotValue(prev, key), snapshotValue(next, key)
+		if oldV == newV {
+			continue
+		}
 		m := meta[key]
 		return &ImmutableChangedError{
 			Field: m.goPath,
 			Key:   key,
-			Old:   displayImmutable(oldV, m.secret, redact),
-			New:   displayImmutable(newV, m.secret, redact),
-		}
-	}
-	for key, prevVal := range prev {
-		newVal, ok := next[key]
-		if !ok {
-			return mkErr(key, prevVal, unsetSentinel)
-		}
-		if newVal != prevVal {
-			return mkErr(key, prevVal, newVal)
-		}
-	}
-	for key, newVal := range next {
-		if _, ok := prev[key]; !ok {
-			return mkErr(key, unsetSentinel, newVal)
+			Old:   displayImmutable(oldV, m.redact, redact),
+			New:   displayImmutable(newV, m.redact, redact),
 		}
 	}
 	return nil
 }
 
-// displayImmutable renders an immutable snapshot value for an error
-// message: the unset sentinel becomes "<unset>", and a secret-tagged
-// value is run through redact.
+func snapshotValue(m map[string]string, key string) string {
+	if v, ok := m[key]; ok {
+		return v
+	}
+	return unsetSentinel
+}
+
+// displayImmutable renders an immutable value for an error message: the
+// unset sentinel becomes "<unset>", and a redacted field's value is run
+// through redact.
 func displayImmutable(v string, secret bool, redact func(string) string) string {
 	if v == unsetSentinel {
 		return "<unset>"

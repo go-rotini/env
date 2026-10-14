@@ -5,6 +5,7 @@ import (
 	"io"
 	"reflect"
 	"strings"
+	"unicode/utf8"
 )
 
 // FieldDoc describes one loadable field. Returned by [Describe] and
@@ -21,18 +22,22 @@ type FieldDoc struct {
 	// Description is the free-text help string from the envDesc tag.
 	Description string
 
-	// Default is the literal default value from the default= tag option.
-	// Empty when no default is set.
+	// Default is the literal default value from the default= tag option,
+	// passed through the loader's secret redactor (see
+	// [WithSecretRedactor]) when Secret is true. Empty when no default
+	// is set.
 	Default string
 
 	// Required is true when the field carries the required tag option,
-	// or implicitly required under [WithRequireAll].
+	// or when the loader uses [WithRequireAll] and the field has no
+	// default.
 	Required bool
 
 	// NotEmpty is true when the field carries the notEmpty tag option.
 	NotEmpty bool
 
-	// Secret is true when the field carries the secret tag option.
+	// Secret is true when the field carries the secret tag option or
+	// its type is a [Secret].
 	Secret bool
 
 	// Immutable is true when the field carries the immutable tag option.
@@ -52,7 +57,9 @@ func Describe(v any, opts ...Option) []FieldDoc {
 }
 
 // PrintUsage writes a column-aligned table of v's loadable fields to
-// w. Suitable for `myapp --env-help`-style output.
+// w: name, type, default (truncated to 40 characters), required, and
+// description. Suitable for `myapp --env-help`-style output. Writes
+// nothing for a struct with no loadable fields.
 func PrintUsage(w io.Writer, v any, opts ...Option) error {
 	return New(opts...).PrintUsage(w, v)
 }
@@ -74,7 +81,7 @@ func (l *Loader) Describe(v any) []FieldDoc {
 	if info.Err != nil {
 		return nil
 	}
-	return l.buildFieldDocs(rv.Type(), info)
+	return l.buildFieldDocs(info)
 }
 
 // PrintUsage is the [Loader]-method form of [PrintUsage]. Returns an
@@ -88,7 +95,9 @@ func (l *Loader) PrintUsage(w io.Writer, v any) error {
 	return printUsageTable(w, docs)
 }
 
-// Markdown is the [Loader]-method form of [Markdown].
+// Markdown is the [Loader]-method form of [Markdown]. Returns an error
+// when v is not a struct, struct tags fail to validate, or writing
+// fails.
 func (l *Loader) Markdown(w io.Writer, v any) error {
 	docs, err := l.docsOrError(v)
 	if err != nil {
@@ -133,21 +142,25 @@ func (l *Loader) docsOrError(v any) ([]FieldDoc, error) {
 	if info.Err != nil {
 		return nil, info.Err
 	}
-	return l.buildFieldDocs(rv.Type(), info), nil
+	return l.buildFieldDocs(info), nil
 }
 
-func (l *Loader) buildFieldDocs(t reflect.Type, info *structInfo) []FieldDoc {
+func (l *Loader) buildFieldDocs(info *structInfo) []FieldDoc {
 	docs := make([]FieldDoc, 0, len(info.Fields))
 	for _, fd := range info.Fields {
-		field := t.FieldByIndex(fd.Index)
+		secret := fd.Secret
+		def := fd.DefaultValue
+		if secret && fd.HasDefault {
+			def = l.redactor()(def)
+		}
 		docs = append(docs, FieldDoc{
 			Name:        l.opts.prefix + fd.Key,
-			GoType:      field.Type.String(),
+			GoType:      fd.Type.String(),
 			Description: fd.Description,
-			Default:     fd.DefaultValue,
-			Required:    fd.Required,
+			Default:     def,
+			Required:    fd.Required || (l.opts.requireAll && !fd.HasDefault),
 			NotEmpty:    fd.NotEmpty,
-			Secret:      fd.Secret,
+			Secret:      secret,
 			Immutable:   fd.Immutable,
 			Separator:   fd.Separator,
 		})
@@ -179,14 +192,14 @@ func printUsageTable(w io.Writer, docs []FieldDoc) error {
 	reqW := len(headerReq)
 
 	for _, d := range docs {
-		if l := len(d.Name); l > nameW {
+		if l := width(d.Name); l > nameW {
 			nameW = l
 		}
-		if l := len(d.GoType); l > typeW {
+		if l := width(d.GoType); l > typeW {
 			typeW = l
 		}
 		dv := truncate(d.Default, maxDefaultDisplayWidth)
-		if l := len(dv); l > defW {
+		if l := width(dv); l > defW {
 			defW = l
 		}
 	}
@@ -280,15 +293,31 @@ func composeDescription(d FieldDoc) string {
 	return prefix + " " + d.Description
 }
 
-// truncate clamps s to maxLen bytes with an ellipsis tail.
+// truncate clamps s to maxLen characters with an ellipsis tail, never
+// splitting a UTF-8 sequence.
 func truncate(s string, maxLen int) string {
-	if maxLen <= 0 || len(s) <= maxLen {
+	if maxLen <= 0 || utf8.RuneCountInString(s) <= maxLen {
 		return s
 	}
+	keep := maxLen - 3
 	if maxLen <= 3 {
-		return s[:maxLen]
+		keep = maxLen
 	}
-	return s[:maxLen-3] + "..."
+	end := 0
+	for range keep {
+		_, size := utf8.DecodeRuneInString(s[end:])
+		end += size
+	}
+	if maxLen <= 3 {
+		return s[:end]
+	}
+	return s[:end] + "..."
+}
+
+// width is the display width of s in characters, used to align the
+// usage table.
+func width(s string) int {
+	return utf8.RuneCountInString(s)
 }
 
 // escapeMD escapes pipe characters in markdown table cells; other

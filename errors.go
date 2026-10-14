@@ -6,14 +6,15 @@ import (
 	"strings"
 )
 
-// MissingRequiredError is reported for a field marked required (or
-// notEmpty) whose key is absent from every Source and which has no
-// default.
+// MissingRequiredError is reported for a field marked required or
+// notEmpty (or any field under [WithRequireAll]) whose key is absent
+// from every Source and which has no default.
 type MissingRequiredError struct {
 	Field string
 	Key   string
 }
 
+// Error names the missing variable and its field.
 func (e *MissingRequiredError) Error() string {
 	if e == nil || e.Field == "" {
 		return "env: missing required variable"
@@ -21,6 +22,7 @@ func (e *MissingRequiredError) Error() string {
 	return fmt.Sprintf("env: missing required variable %q (field %s)", e.Key, e.Field)
 }
 
+// Is matches any *MissingRequiredError, such as [ErrMissingRequired].
 func (*MissingRequiredError) Is(target error) bool {
 	_, ok := target.(*MissingRequiredError)
 	return ok
@@ -33,6 +35,7 @@ type EmptyValueError struct {
 	Key   string
 }
 
+// Error names the empty variable and its field.
 func (e *EmptyValueError) Error() string {
 	if e == nil || e.Field == "" {
 		return "env: empty value for field marked notEmpty"
@@ -40,6 +43,7 @@ func (e *EmptyValueError) Error() string {
 	return fmt.Sprintf("env: empty value for %q (field %s, marked notEmpty)", e.Key, e.Field)
 }
 
+// Is matches any *EmptyValueError, such as [ErrEmptyValue].
 func (*EmptyValueError) Is(target error) bool {
 	_, ok := target.(*EmptyValueError)
 	return ok
@@ -48,7 +52,8 @@ func (*EmptyValueError) Is(target error) bool {
 // ParseError is reported when a string value cannot be converted to a
 // field's target Go type. Field, Key, Value, and Type may be empty when
 // the error originates inside the decoder before the loader has wrapped
-// it with field context.
+// it with field context. For a secret-tagged field the loader runs
+// Value through the secret redactor and drops Cause.
 type ParseError struct {
 	Field string
 	Key   string
@@ -57,6 +62,8 @@ type ParseError struct {
 	Cause error
 }
 
+// Error describes the value, target type and cause, plus the field and
+// key when known.
 func (e *ParseError) Error() string {
 	if e == nil {
 		return "env: parse error"
@@ -84,11 +91,13 @@ func (e *ParseError) Error() string {
 	return b.String()
 }
 
+// Is matches any *ParseError, such as [ErrParse].
 func (*ParseError) Is(target error) bool {
 	_, ok := target.(*ParseError)
 	return ok
 }
 
+// Unwrap returns Cause.
 func (e *ParseError) Unwrap() error {
 	if e == nil {
 		return nil
@@ -102,6 +111,7 @@ type ValidationError struct {
 	Cause error
 }
 
+// Error prefixes the cause's text.
 func (e *ValidationError) Error() string {
 	if e == nil || e.Cause == nil {
 		return "env: validation error"
@@ -109,11 +119,13 @@ func (e *ValidationError) Error() string {
 	return fmt.Sprintf("env: validation: %v", e.Cause)
 }
 
+// Is matches any *ValidationError, such as [ErrValidation].
 func (*ValidationError) Is(target error) bool {
 	_, ok := target.(*ValidationError)
 	return ok
 }
 
+// Unwrap returns Cause.
 func (e *ValidationError) Unwrap() error {
 	if e == nil {
 		return nil
@@ -122,8 +134,11 @@ func (e *ValidationError) Unwrap() error {
 }
 
 // ImmutableChangedError is reported when a reload candidate would have
-// changed a field tagged immutable. For secret-tagged fields, Old and
-// New are redacted (run through the loader's secret redactor).
+// changed a field tagged immutable. Old and New are the strings the
+// field was decoded from; they are run through the loader's secret
+// redactor for secret, fromFile and expand fields, and for every field
+// when the loader has a [Mutator] (whose output may be a resolved
+// secret).
 type ImmutableChangedError struct {
 	Field string
 	Key   string
@@ -131,6 +146,7 @@ type ImmutableChangedError struct {
 	New   string
 }
 
+// Error names the field and key; it does not include Old or New.
 func (e *ImmutableChangedError) Error() string {
 	if e == nil {
 		return "env: immutable field changed"
@@ -138,6 +154,7 @@ func (e *ImmutableChangedError) Error() string {
 	return fmt.Sprintf("env: immutable field %s (key %s) changed", e.Field, e.Key)
 }
 
+// Is matches any *ImmutableChangedError, such as [ErrImmutableChanged].
 func (*ImmutableChangedError) Is(target error) bool {
 	_, ok := target.(*ImmutableChangedError)
 	return ok
@@ -154,6 +171,7 @@ type CycleError struct {
 	Chain []string
 }
 
+// Error renders the reference chain.
 func (e *CycleError) Error() string {
 	if e == nil || len(e.Chain) == 0 {
 		return "env: variable expansion cycle"
@@ -161,18 +179,21 @@ func (e *CycleError) Error() string {
 	return fmt.Sprintf("env: variable expansion cycle: %s", strings.Join(e.Chain, " -> "))
 }
 
+// Is matches any *CycleError, such as [ErrCycle].
 func (*CycleError) Is(target error) bool {
 	_, ok := target.(*CycleError)
 	return ok
 }
 
-// MultiError aggregates per-field errors from a single Load call.
-// Implements the Go 1.20+ Unwrap() []error convention so [errors.Is]
-// and [errors.As] walk every branch.
+// MultiError aggregates the per-field errors, and any validation
+// error, from a single Load call. Its Unwrap() []error method lets
+// [errors.Is] and [errors.As] walk every branch.
 type MultiError struct {
 	Errors []error
 }
 
+// Error returns the single error's text, or a count followed by one
+// line per error.
 func (m *MultiError) Error() string {
 	if m == nil || len(m.Errors) == 0 {
 		return "env: no errors"
@@ -197,6 +218,7 @@ func (m *MultiError) Unwrap() []error {
 	return m.Errors
 }
 
+// Is matches any *MultiError, such as [ErrMultiError].
 func (*MultiError) Is(target error) bool {
 	_, ok := target.(*MultiError)
 	return ok
@@ -212,6 +234,9 @@ func (m *MultiError) Append(err error) {
 
 // Sentinel errors. The struct-pointer sentinels match by type via each
 // error's Is method; the [errors.New] sentinels match by value identity.
+// Never pass a struct-pointer sentinel's address to [errors.As] (as in
+// &ErrParse): that overwrites the shared sentinel. Declare a variable of
+// the error type for errors.As instead.
 var (
 	// ErrMissingRequired matches any [*MissingRequiredError].
 	ErrMissingRequired = &MissingRequiredError{}
@@ -248,6 +273,18 @@ var (
 	// ErrConflictingFields is returned when two fields in the same
 	// struct resolve to the same env-var key after prefix accumulation.
 	ErrConflictingFields = errors.New("env: conflicting field names")
+
+	// ErrRecursiveType is returned when a struct type contains itself
+	// (directly or through pointers or embedding) along a path the
+	// loader would walk. Tag the self-referencing field with env:"-" to
+	// skip it.
+	ErrRecursiveType = errors.New("env: recursive struct type")
+
+	// ErrSeparatorInValue is returned by [Encode] when a slice, array or
+	// map element contains the separator it would be joined with, or the
+	// only element of a slice or array is empty, so the output could not
+	// load back as the same value.
+	ErrSeparatorInValue = errors.New("env: element contains its separator")
 
 	// ErrUnsupportedType is returned when a struct field's target type
 	// cannot be decoded from a string by any built-in or interface

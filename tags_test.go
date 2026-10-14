@@ -2,6 +2,7 @@ package env
 
 import (
 	"errors"
+	"io"
 	"math/big"
 	"net"
 	"net/url"
@@ -651,4 +652,102 @@ func mustField(t *testing.T, fields []fieldDescriptor, key string) fieldDescript
 	}
 	t.Fatalf("no field with key %q in %v", key, fieldKeys(fields))
 	return fieldDescriptor{}
+}
+
+type recursiveNode struct {
+	Name string
+	Next *recursiveNode
+}
+
+type recursiveOuter struct {
+	Inner struct {
+		Back *recursiveOuter
+	}
+}
+
+type recursiveEmbed struct {
+	*recursiveEmbed //nolint:unused // only its type matters to the walk
+	Port            int
+}
+
+func TestWalk_RecursiveTypeIsAnError(t *testing.T) {
+	t.Parallel()
+	for name, v := range map[string]any{
+		"self pointer":  &recursiveNode{},
+		"through child": &recursiveOuter{},
+		"embedded":      &recursiveEmbed{},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			l := New(WithSource(Map(nil)))
+			if err := l.Load(v); !errors.Is(err, ErrRecursiveType) {
+				t.Errorf("Load = %v, want ErrRecursiveType", err)
+			}
+			if err := l.PrintUsage(io.Discard, v); !errors.Is(err, ErrRecursiveType) {
+				t.Errorf("PrintUsage = %v, want ErrRecursiveType", err)
+			}
+			if err := Encode(io.Discard, v); !errors.Is(err, ErrRecursiveType) {
+				t.Errorf("Encode = %v, want ErrRecursiveType", err)
+			}
+		})
+	}
+}
+
+func TestWalk_RecursiveFieldSkippedWithDash(t *testing.T) {
+	t.Parallel()
+	type node struct {
+		Name string         `env:"NAME"`
+		Next *recursiveNode `env:"-"`
+	}
+	var n node
+	if err := New(WithSource(Map(map[string]string{"NAME": "a"}))).Load(&n); err != nil || n.Name != "a" {
+		t.Fatalf("Load = %v, %+v", err, n)
+	}
+}
+
+type tagEmbedded struct{ Z int }
+
+func TestWalk_EnvTagOnEmbeddedStructIgnored(t *testing.T) {
+	t.Parallel()
+	var c struct {
+		tagEmbedded `env:"EMB,required"`
+	}
+	if err := New(WithSource(Map(map[string]string{"Z": "7"}))).Load(&c); err != nil || c.Z != 7 {
+		t.Errorf("Load = %v, Z = %d; want nil, 7", err, c.Z)
+	}
+}
+
+type (
+	selfMap   map[string]selfMap
+	selfSlice []selfSlice
+	selfArray [2]*selfArray
+)
+
+func TestWalk_SelfReferencingContainerTypes(t *testing.T) {
+	t.Parallel()
+	type cfg struct {
+		M selfMap   `env:"M"`
+		S selfSlice `env:"S"`
+		A selfArray `env:"A"`
+		K map[*selfArray]Secret[string]
+	}
+	if isSecretType(reflect.TypeFor[selfMap]()) || isSecretType(reflect.TypeFor[selfArray]()) {
+		t.Error("isSecretType = true for a self-referencing type without Secret")
+	}
+	if !isSecretType(reflect.TypeFor[map[*selfArray]Secret[string]]()) {
+		t.Error("isSecretType = false for a map of Secret")
+	}
+	var c cfg
+	l := New(WithSource(Map(nil)))
+	if err := l.Load(&c); err != nil {
+		t.Fatalf("Load = %v", err)
+	}
+	if docs := l.Describe(&c); len(docs) != 4 {
+		t.Errorf("Describe = %d rows, want 4", len(docs))
+	}
+	// The nil *selfArray elements have no text form; Encode must still
+	// return.
+	if err := l.Encode(io.Discard, &c); err != nil && !errors.Is(err, ErrUnsupportedType) {
+		t.Errorf("Encode = %v", err)
+	}
 }

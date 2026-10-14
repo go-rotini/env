@@ -238,31 +238,38 @@ func TestWatch_DebounceCoalesces(t *testing.T) {
 	src := newPushSource(map[string]string{"FOO": "v0"})
 	loader := env.New(
 		env.WithSource(src),
-		env.WithReloadDebounce(120*time.Millisecond),
+		env.WithReloadDebounce(time.Second),
 	)
 	var cfg basicCfg
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	ch, _ := loader.Watch(ctx, &cfg)
 
+	// The whole burst runs under the source's lock, so any reload sees
+	// the final value, and it takes far less than the debounce window.
+	src.mu.Lock()
 	for i := 1; i <= 5; i++ {
-		src.set("FOO", "v"+itoa(i))
-		time.Sleep(15 * time.Millisecond)
+		src.values["FOO"] = "v" + itoa(i)
+		src.broadcastLocked(env.Change{Keys: []string{"FOO"}})
 	}
+	src.mu.Unlock()
 
 	ev := awaitEvent(t, ch, "coalesced reload")
 	if ev.Err != nil {
 		t.Fatalf("ev.Err = %v", ev.Err)
 	}
+
+	// Stop the worker before reading cfg; count any further events.
+	cancel()
+	extra := 0
+	for range ch {
+		extra++
+	}
+	if extra != 0 {
+		t.Errorf("got %d more events; debounce should have coalesced the burst", extra)
+	}
 	if cfg.Foo != "v5" {
 		t.Errorf("cfg.Foo = %q, want v5", cfg.Foo)
-	}
-
-	// No second event should fire.
-	select {
-	case ev := <-ch:
-		t.Errorf("got second event %+v; debounce should have coalesced the burst", ev)
-	case <-time.After(200 * time.Millisecond):
 	}
 }
 
@@ -413,18 +420,13 @@ func TestWatch_PollingNonWatcherSource(t *testing.T) {
 	store["FOO"] = "polled"
 	mu.Unlock()
 
-	// Read cfg ONLY after an event arrives. The channel send establishes
-	// happens-before with the worker's reflect-write into &cfg.
-	deadline := time.After(2 * time.Second)
-	for {
-		select {
-		case <-ch:
-			if cfg.Foo == "polled" {
-				return
-			}
-		case <-deadline:
-			t.Fatalf("after polling: cfg.Foo = %q, want polled", cfg.Foo)
-		}
+	// Every poll tick writes cfg, so read it only after the worker has
+	// stopped: cancel, then drain the channel until it closes.
+	ev := awaitEvent(t, ch, "after polling")
+	cancel()
+	awaitClose(t, ch, "after cancel")
+	if ev.Err != nil || cfg.Foo != "polled" {
+		t.Fatalf("after polling: ev.Err = %v, cfg.Foo = %q, want polled", ev.Err, cfg.Foo)
 	}
 }
 
