@@ -127,7 +127,7 @@ func (s *Secret[T]) renderSecret(e *encoder, fd fieldDescriptor) (string, error)
 const secretMarker = "<redacted>"
 
 // secretPkgPath is the import path [Secret] instantiations report.
-var secretPkgPath = reflect.TypeFor[Secret[struct{}]]().PkgPath()
+var secretPkgPath = reflect.TypeFor[ParseError]().PkgPath() // any type defined in this package; Secret[struct{}] would link a whole instantiation
 
 // isSecret reports whether t is an instantiation of [Secret] itself. A
 // struct that embeds a Secret is not one, although Secret's methods are
