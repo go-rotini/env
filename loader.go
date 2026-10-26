@@ -355,7 +355,7 @@ func (l *Loader) populateField(ctx context.Context, root reflect.Value, fd field
 
 	if dec, ok := l.opts.customDecoders[field.Type()]; ok {
 		if err := dec(rawValue, field); err != nil {
-			if _, ok := errors.AsType[*ParseError](err); !ok { //nolint:errcheck // only whether it matches is used
+			if _, ok := errors.AsType[*ParseError](err); !ok {
 				err = wrapDecodeErr(field.Type(), rawValue, err)
 			}
 			multi.Append(l.annotateParseError(err, fd, resolvedKey, rawValue, field.Type()))
